@@ -1,5 +1,6 @@
 streamlit
 openai
 pdfplumber
-pandas
 openpyxl
+pandas
+requests
