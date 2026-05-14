@@ -2,17 +2,17 @@ import streamlit as st
 import tempfile
 import os
 import json
-import requests
 import pdfplumber
 import openpyxl
 from openpyxl.utils import get_column_letter
 from typing import Dict, Any, List, Union
-import pandas as pd  # 仅用于读取列头，不用于写入
+import pandas as pd  # 仅用于辅助读取列头，不用于写入
+from openai import OpenAI
 
 # ----------------------------- 页面配置 -----------------------------
-st.set_page_config(page_title="AI 简历解析与模板填充 (通用版)", layout="wide")
+st.set_page_config(page_title="AI 简历解析与模板填充 (智谱AI版)", layout="wide")
 st.title("📄 AI 简历解析 → 任意 Excel 模板")
-st.markdown("上传 PDF 简历和 Excel 模板，AI 自动理解模板结构并填充内容，**保留原格式**。")
+st.markdown("上传 PDF 简历和 Excel 模板，**智谱AI** 自动理解模板结构并填充内容，**保留原格式**。")
 
 # ----------------------------- 1. 模板结构提取 -----------------------------
 def get_template_structure(template_path: str) -> Dict[str, List[str]]:
@@ -46,54 +46,34 @@ def extract_text_from_pdf(pdf_file) -> str:
     os.unlink(tmp_path)
     return text.strip()
 
-# ----------------------------- 3. 大模型调用抽象层 -----------------------------
-class ModelClient:
-    """统一接口，支持 OpenAI 和 Ollama"""
-    def __init__(self, model_type: str, api_key: str = None, model_name: str = None, base_url: str = None):
-        self.model_type = model_type
+# ----------------------------- 3. 智谱AI调用封装 -----------------------------
+class ZhipuAIClient:
+    """智谱AI客户端（兼容OpenAI SDK）"""
+    def __init__(self, api_key: str, model_name: str = "glm-4-flash"):
         self.api_key = api_key
         self.model_name = model_name
-        self.base_url = base_url
-
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url="https://open.bigmodel.cn/api/paas/v4/"
+        )
+    
     def call(self, prompt: str) -> str:
-        if self.model_type == "OpenAI":
-            from openai import OpenAI
-            client = OpenAI(api_key=self.api_key)
-            response = client.chat.completions.create(
-                model=self.model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0
-            )
-            return response.choices[0].message.content
-        elif self.model_type == "Ollama":
-            url = f"{self.base_url}/api/generate"
-            payload = {
-                "model": self.model_name,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.0}
-            }
-            resp = requests.post(url, json=payload)
-            resp.raise_for_status()
-            return resp.json()["response"]
-        else:
-            raise ValueError(f"不支持的模型类型: {self.model_type}")
+        response = self.client.chat.completions.create(
+            model=self.model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0
+        )
+        return response.choices[0].message.content
 
 # ----------------------------- 4. 智能解析（根据模板结构） -----------------------------
 def parse_resume_with_llm(
     resume_text: str,
     template_structure: Dict[str, List[str]],
-    model_client: ModelClient
+    llm_client: ZhipuAIClient
 ) -> Dict[str, Union[Dict, List]]:
     """
     让 AI 根据模板结构返回 JSON。
     每个 sheet 对应一个 JSON 对象，如果是多条数据则为数组。
-    输出示例：
-    {
-        "基本信息": {"姓名": "张三", "电话": "138...", ...},
-        "工作经历": [{"公司名称": "XX", "职位": "工程师", ...}, ...],
-        "教育经历": [{"学校": "XX大学", ...}]
-    }
     """
     # 构建描述模板结构的 prompt
     structure_desc = ""
@@ -115,7 +95,7 @@ def parse_resume_with_llm(
 简历文本：
 {resume_text}
 """
-    response = model_client.call(prompt)
+    response = llm_client.call(prompt)
     # 清理可能的 markdown
     if response.startswith("```json"):
         response = response[7:]
@@ -136,32 +116,31 @@ def fill_template_keep_format(
 ):
     """
     用 openpyxl 填充数据，保留原始样式、合并单元格。
-    策略：
-      - 保留第一行表头不变。
-      - 对于单行数据（Dict）：覆盖第二行（如果第二行有数据则替换，无则创建）。
-      - 对于多行数据（List）：从第二行开始，先清空原有数据行（保留表头），然后逐行写入列表数据。
     """
     wb = openpyxl.load_workbook(template_path)
     for sheet_name, data in parsed_data.items():
         if sheet_name not in wb.sheetnames:
             continue
         ws = wb[sheet_name]
-        headers = [cell.value for cell in ws[1] if cell.value]  # 第一行列头
+        # 获取第一行表头（非空单元格值）
+        headers = []
+        for cell in ws[1]:
+            if cell.value:
+                headers.append(str(cell.value).strip())
         # 建立列头到列索引的映射
         col_index = {}
         for idx, h in enumerate(headers, start=1):
-            col_index[str(h).strip()] = idx
+            col_index[h] = idx
 
         # 处理单行数据（dict）
         if isinstance(data, dict):
-            # 写入第二行
             row_num = 2
             for field, value in data.items():
                 if field in col_index:
                     ws.cell(row=row_num, column=col_index[field], value=value)
         # 处理多行数据（list）
         elif isinstance(data, list):
-            # 先删除第2行及以下的所有数据行（保留表头）
+            # 删除第2行及以下所有数据行（保留表头）
             if ws.max_row >= 2:
                 ws.delete_rows(2, ws.max_row - 1)
             # 写入新数据
@@ -173,23 +152,22 @@ def fill_template_keep_format(
             st.warning(f"Sheet {sheet_name} 数据格式异常：{type(data)}，跳过")
     wb.save(output_path)
 
-# ----------------------------- 6. Streamlit 界面 -----------------------------
+# ----------------------------- 6. Streamlit 界面（仅智谱AI） -----------------------------
 with st.sidebar:
-    st.header("🤖 模型配置")
-    model_type = st.selectbox("选择大模型后端", ["OpenAI", "Ollama"])
-    if model_type == "OpenAI":
-        api_key = st.text_input("OpenAI API Key", type="password", help="需付费，但效果好")
-        model_name = st.selectbox("模型", ["gpt-3.5-turbo", "gpt-4"])
-        base_url = None
-    else:  # Ollama
-        api_key = None
-        model_name = st.text_input("Ollama 模型名称", value="llama3", help="本地已安装的模型，如 llama3, qwen2")
-        base_url = st.text_input("Ollama API 地址", value="http://localhost:11434")
+    st.header("🔑 智谱AI 配置")
+    api_key = st.text_input("API Key", type="password", help="从 https://bigmodel.cn 获取，新用户送免费额度")
+    model_name = st.selectbox(
+        "模型选择",
+        ["glm-4-flash", "glm-4-plus", "glm-4-air", "glm-4-long"],
+        index=0,
+        help="glm-4-flash 永久免费，推荐使用"
+    )
     st.markdown("---")
     st.markdown("**说明**：")
     st.markdown("- 上传任意 Excel 模板，AI 会根据列头自动填充")
     st.markdown("- 保留原有样式、合并单元格")
     st.markdown("- 支持多行数据（如工作经历、教育经历）")
+    st.markdown("- 智谱AI新用户赠送免费额度，glm-4-flash 长期免费")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -201,11 +179,8 @@ if st.button("🚀 开始解析并生成", type="primary"):
     if not pdf_file or not template_file:
         st.error("请同时上传 PDF 和 Excel 模板。")
         st.stop()
-    if model_type == "OpenAI" and not api_key:
-        st.error("请填写 OpenAI API Key。")
-        st.stop()
-    if model_type == "Ollama" and not model_name:
-        st.error("请填写 Ollama 模型名称。")
+    if not api_key:
+        st.error("请填写智谱AI API Key。")
         st.stop()
 
     progress_bar = st.progress(0, text="准备就绪...")
@@ -237,11 +212,11 @@ if st.button("🚀 开始解析并生成", type="primary"):
             st.stop()
     progress_bar.progress(40, text="PDF 内容提取完成")
 
-    # 3. 调用 AI 解析
-    with st.spinner(f"正在调用 {model_type} 解析简历（可能需要几秒）..."):
+    # 3. 调用智谱AI解析
+    with st.spinner(f"正在调用智谱AI（{model_name}）解析简历..."):
         try:
-            model_client = ModelClient(model_type, api_key, model_name, base_url)
-            parsed_data = parse_resume_with_llm(resume_text, template_structure, model_client)
+            llm_client = ZhipuAIClient(api_key=api_key, model_name=model_name)
+            parsed_data = parse_resume_with_llm(resume_text, template_structure, llm_client)
             st.success("AI 解析完成！")
             with st.expander("查看 AI 提取的数据"):
                 st.json(parsed_data)
