@@ -4,32 +4,92 @@ import os
 import json
 import pdfplumber
 import openpyxl
-from openpyxl.utils import get_column_letter
-from typing import Dict, Any, List, Union
-import pandas as pd
+from openpyxl.utils import get_column_letter, range_boundaries
+from typing import Dict, Any, List, Union, Tuple
+import re
 from openai import OpenAI
 
 # ----------------------------- 页面配置 -----------------------------
-st.set_page_config(page_title="AI 简历解析与模板填充 (智谱AI版)", layout="wide")
-st.title("📄 AI 简历解析 → 任意 Excel 模板 (仅使用第一个Sheet)")
-st.markdown("上传 PDF 简历和 Excel 模板，**智谱AI** 自动理解模板结构并填充内容，**保留原格式**。")
+st.set_page_config(page_title="智能简历解析 (合并单元格模板)", layout="wide")
+st.title("📄 AI 简历解析 → 复杂 Excel 模板")
+st.markdown("支持合并单元格、键值对字段、多行表格（如工作经历、项目经历），**保留原格式**。")
 
-# ----------------------------- 1. 模板结构提取 (仅第一个Sheet) -----------------------------
-def get_template_structure(template_path: str) -> Dict[str, List[str]]:
+# ----------------------------- 辅助函数 -----------------------------
+def get_merged_cell_value(ws, cell):
+    """获取单元格实际值（处理合并单元格）"""
+    for merged_range in ws.merged_cells.ranges:
+        if cell.coordinate in merged_range:
+            return ws.cell(merged_range.min_row, merged_range.min_col).value
+    return cell.value
+
+def scan_template_structure(template_path: str) -> Dict[str, Any]:
     """
-    只读取 Excel 模板的第一个 Sheet，返回 {sheet_name: [列头列表]}
+    扫描第一个sheet，识别：
+    - key_value_fields: {'姓名': (row, col), ...}  用于单个字段填充
+    - tables: [{'name': '工作经历', 'header_row': row, 'start_col': col, 'headers': [...], 'data_start_row': row+1}, ...]
     """
     wb = openpyxl.load_workbook(template_path, data_only=True)
-    sheet_name = wb.sheetnames[0]  # 只取第一个 sheet
+    sheet_name = wb.sheetnames[0]
     ws = wb[sheet_name]
-    headers = []
-    for col in range(1, ws.max_column + 1):
-        cell_value = ws.cell(row=1, column=col).value
-        if cell_value:
-            headers.append(str(cell_value).strip())
-    return {sheet_name: headers}
+    
+    # 1. 识别键值对字段（内容以"："或":"结尾，且右侧有可填充单元格）
+    key_value_fields = {}
+    for row in range(1, ws.max_row + 1):
+        for col in range(1, ws.max_column + 1):
+            cell = ws.cell(row, col)
+            value = cell.value
+            if value and isinstance(value, str):
+                value = value.strip()
+                # 匹配如 "姓名："、"姓名:" 或 "姓名：" 带冒号的模式
+                if re.search(r'[：:]$', value):
+                    label = value.rstrip('：:').strip()
+                    # 右侧单元格（或合并单元格）作为填充目标
+                    target_cell = ws.cell(row, col + 1)
+                    # 如果右侧是合并单元格，找到合并区域的实际位置
+                    target_row, target_col = row, col + 1
+                    for merged in ws.merged_cells.ranges:
+                        if target_cell.coordinate in merged:
+                            target_row, target_col = merged.min_row, merged.min_col
+                            break
+                    key_value_fields[label] = (target_row, target_col)
+    
+    # 2. 识别表格区域（通过常见表头关键词，如“工作开始日期”、“单位名称”等）
+    tables = []
+    # 定义表头关键词组
+    table_keywords = {
+        "工作经历": ["工作开始日期", "工作结束日期", "单位名称", "岗位/职务", "是否邮储银行自主研发工作经验"],
+        "项目经历": ["工作开始日期", "工作结束日期", "项目名称", "项目描述", "项目角色", "是否邮储银行自主研发工作经验"]
+    }
+    for table_name, keywords in table_keywords.items():
+        for row in range(1, ws.max_row + 1):
+            header_row_cells = [ws.cell(row, col).value for col in range(1, ws.max_column + 1) if ws.cell(row, col).value]
+            # 检查该行是否包含所有关键词（或大部分）
+            matched = all(any(kw in str(cell) for cell in header_row_cells) for kw in keywords[:2])  # 至少匹配前两个
+            if matched:
+                # 找到表头各列的位置
+                headers = []
+                start_col = None
+                for col in range(1, ws.max_column + 1):
+                    val = ws.cell(row, col).value
+                    if val:
+                        headers.append(str(val).strip())
+                        if start_col is None:
+                            start_col = col
+                tables.append({
+                    'name': table_name,
+                    'header_row': row,
+                    'start_col': start_col,
+                    'headers': headers,
+                    'data_start_row': row + 1
+                })
+                break  # 每个表只找一次
+    
+    return {
+        'key_value_fields': key_value_fields,
+        'tables': tables,
+        'sheet_name': sheet_name
+    }
 
-# ----------------------------- 2. PDF 文本提取 -----------------------------
 def extract_text_from_pdf(pdf_file) -> str:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(pdf_file.getbuffer())
@@ -43,17 +103,11 @@ def extract_text_from_pdf(pdf_file) -> str:
     os.unlink(tmp_path)
     return text.strip()
 
-# ----------------------------- 3. 智谱AI调用封装 -----------------------------
+# ----------------------------- 智谱AI调用 -----------------------------
 class ZhipuAIClient:
-    """智谱AI客户端（兼容OpenAI SDK）"""
     def __init__(self, api_key: str, model_name: str = "glm-4-flash"):
-        self.api_key = api_key
+        self.client = OpenAI(api_key=api_key, base_url="https://open.bigmodel.cn/api/paas/v4/")
         self.model_name = model_name
-        self.client = OpenAI(
-            api_key=api_key,
-            base_url="https://open.bigmodel.cn/api/paas/v4/"
-        )
-    
     def call(self, prompt: str) -> str:
         response = self.client.chat.completions.create(
             model=self.model_name,
@@ -62,116 +116,117 @@ class ZhipuAIClient:
         )
         return response.choices[0].message.content
 
-# ----------------------------- 4. 智能解析（根据模板结构） -----------------------------
-def parse_resume_with_llm(
-    resume_text: str,
-    template_structure: Dict[str, List[str]],
-    llm_client: ZhipuAIClient
-) -> Dict[str, Union[Dict, List]]:
+def parse_resume_with_llm(resume_text: str, template_structure: Dict, llm_client: ZhipuAIClient) -> Dict:
     """
-    让 AI 根据模板结构返回 JSON。
-    每个 sheet 对应一个 JSON 对象，如果是多条数据则为数组。
+    让AI根据模板结构输出JSON，包含单字段和表格数据。
+    输出示例：
+    {
+        "fields": {"姓名": "张三", "电话": "138...", ...},
+        "工作经历": [{"工作开始日期": "2020-01", "单位名称": "XX公司", ...}, ...],
+        "项目经历": [...]
+    }
     """
-    # 构建描述模板结构的 prompt
-    structure_desc = ""
-    for sheet, headers in template_structure.items():
-        structure_desc += f"- Sheet「{sheet}」列头：{headers}\n"
+    # 构建描述
+    field_labels = list(template_structure['key_value_fields'].keys())
+    table_descs = []
+    for tbl in template_structure['tables']:
+        table_descs.append(f"- 表格「{tbl['name']}」列头：{tbl['headers']}")
+    
     prompt = f"""
-你是一个专业的简历解析助手。请根据下方简历文本，按照给定的 Excel 模板结构输出 JSON 数据。
+你是一个专业的简历解析助手。请根据以下简历文本，提取信息，并以严格的JSON格式输出。
 
-模板结构：
-{structure_desc}
+需要提取的信息分为两部分：
 
-要求：
-1. 对于每个 Sheet，根据列头提取相应信息。
-2. 如果某个 Sheet 预期只有一行数据（例如“基本信息”），输出一个对象（dict）。
-3. 如果某个 Sheet 预期有多行数据（例如“工作经历”、“教育经历”），输出一个对象数组（list of dict）。
-4. 输出必须是严格的 JSON 格式，不要有任何额外解释或 markdown 标记。
-5. 如果某个字段找不到信息，填写空字符串 ""。
+1. 单个字段（键值对）：
+{field_labels}
+
+2. 多个表格（每个表格是一个对象数组）：
+{chr(10).join(table_descs) if table_descs else '无'}
+
+输出格式（严格JSON，不要解释）：
+{{
+    "fields": {{"字段1": "值1", "字段2": "值2", ...}},
+    "工作经历": [{{"列头1": "值1", "列头2": "值2", ...}}, ...],
+    "项目经历": [{{...}}]
+}}
+
+注意：
+- 字段名必须与给定的完全一致。
+- 对于工作经历和项目经历，请按时间由近及远排序，提取所有相关条目。
+- 如果某个字段找不到信息，填写空字符串""。
+- 如果某个表格没有数据，输出空数组[]。
 
 简历文本：
 {resume_text}
 """
     response = llm_client.call(prompt)
-    # 清理可能的 markdown
+    # 清理markdown
     if response.startswith("```json"):
         response = response[7:]
     if response.endswith("```"):
         response = response[:-3]
-    try:
-        data = json.loads(response.strip())
-    except json.JSONDecodeError as e:
-        st.error(f"AI 返回的不是合法 JSON：{response[:200]}")
-        raise e
+    data = json.loads(response.strip())
+    # 确保结构完整
+    if 'fields' not in data:
+        data['fields'] = {}
+    for tbl in [t['name'] for t in template_structure['tables']]:
+        if tbl not in data:
+            data[tbl] = []
     return data
 
-# ----------------------------- 5. 通用填充（保持格式，仅第一个Sheet） -----------------------------
-def fill_template_keep_format(
-    template_path: str,
-    parsed_data: Dict[str, Union[Dict, List]],
-    output_path: str
-):
-    """
-    用 openpyxl 填充数据，保留原始样式、合并单元格。只处理模板的第一个 sheet。
-    """
+def fill_template_keep_format(template_path: str, parsed_data: Dict, output_path: str, template_structure: Dict):
+    """根据扫描的结构填充Excel，保留原格式"""
     wb = openpyxl.load_workbook(template_path)
-    target_sheet_name = wb.sheetnames[0]  # 只处理第一个 sheet
+    ws = wb[template_structure['sheet_name']]
     
-    # 获取 AI 返回的对应 sheet 数据，若不存在则用空数据
-    if target_sheet_name not in parsed_data:
-        st.warning(f"AI 返回的数据中没有找到 sheet '{target_sheet_name}'，将使用空数据填充。")
-        data = {}
-    else:
-        data = parsed_data[target_sheet_name]
+    # 1. 填充键值对字段
+    fields = parsed_data.get('fields', {})
+    for label, (row, col) in template_structure['key_value_fields'].items():
+        if label in fields:
+            ws.cell(row=row, column=col, value=fields[label])
     
-    ws = wb[target_sheet_name]
-    # 获取第一行表头（非空单元格值）
-    headers = []
-    for cell in ws[1]:
-        if cell.value:
-            headers.append(str(cell.value).strip())
-    # 建立列头到列索引的映射
-    col_index = {}
-    for idx, h in enumerate(headers, start=1):
-        col_index[h] = idx
-
-    # 处理单行数据（dict）
-    if isinstance(data, dict):
-        row_num = 2
-        for field, value in data.items():
-            if field in col_index:
-                ws.cell(row=row_num, column=col_index[field], value=value)
-    # 处理多行数据（list）
-    elif isinstance(data, list):
-        # 删除第2行及以下所有数据行（保留表头）
-        if ws.max_row >= 2:
-            ws.delete_rows(2, ws.max_row - 1)
+    # 2. 填充表格数据
+    for tbl in template_structure['tables']:
+        table_name = tbl['name']
+        data_rows = parsed_data.get(table_name, [])
+        if not data_rows:
+            continue
+        # 确定表格数据区域：从 data_start_row 开始，先删除原有数据行
+        start_row = tbl['data_start_row']
+        # 找到表格结束行（连续非空行的最大行，或遇到下一个表格/空行）
+        end_row = start_row
+        while end_row <= ws.max_row:
+            # 检查该行是否有任何非空单元格（在表头列范围内）
+            has_data = False
+            for col in range(tbl['start_col'], tbl['start_col'] + len(tbl['headers'])):
+                if ws.cell(end_row, col).value:
+                    has_data = True
+                    break
+            if not has_data:
+                break
+            end_row += 1
+        # 删除原有数据行
+        if end_row > start_row:
+            ws.delete_rows(start_row, end_row - start_row)
         # 写入新数据
-        for row_idx, record in enumerate(data, start=2):
-            for field, value in record.items():
-                if field in col_index:
-                    ws.cell(row=row_idx, column=col_index[field], value=value)
-    else:
-        st.warning(f"Sheet {target_sheet_name} 数据格式异常：{type(data)}，跳过")
-    
+        for i, record in enumerate(data_rows):
+            current_row = start_row + i
+            for col_idx, header in enumerate(tbl['headers']):
+                if header in record:
+                    value = record[header]
+                    ws.cell(row=current_row, column=tbl['start_col'] + col_idx, value=value)
     wb.save(output_path)
 
-# ----------------------------- 6. Streamlit 界面（仅智谱AI） -----------------------------
+# ----------------------------- Streamlit界面 -----------------------------
 with st.sidebar:
     st.header("🔑 智谱AI 配置")
-    api_key = st.text_input("API Key", type="password", help="从 https://bigmodel.cn 获取，新用户送免费额度")
-    model_name = st.selectbox(
-        "模型选择",
-        ["glm-4-flash", "glm-4-plus", "glm-4-air", "glm-4-long"],
-        index=0,
-        help="glm-4-flash 永久免费，推荐使用"
-    )
+    api_key = st.text_input("API Key", type="password", help="从 https://bigmodel.cn 获取")
+    model_name = st.selectbox("模型", ["glm-4-flash", "glm-4-plus"], index=0)
     st.markdown("---")
-    st.markdown("**说明**：")
-    st.markdown("- 上传任意 Excel 模板，AI 会根据**第一个Sheet的列头**自动填充")
-    st.markdown("- 保留原有样式、合并单元格")
-    st.markdown("- 支持多行数据（如工作经历、教育经历）")
-    st.markdown("- 智谱AI新用户赠送免费额度，glm-4-flash 长期免费")
+    st.markdown("**模板要求**：")
+    st.markdown("- 键值对字段以冒号结尾（如 `姓名：`）")
+    st.markdown("- 表格需有明确的表头行（如 `工作开始日期`、`单位名称`）")
+    st.markdown("- 支持合并单元格")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -181,73 +236,67 @@ with col2:
 
 if st.button("🚀 开始解析并生成", type="primary"):
     if not pdf_file or not template_file:
-        st.error("请同时上传 PDF 和 Excel 模板。")
+        st.error("请同时上传文件")
         st.stop()
     if not api_key:
-        st.error("请填写智谱AI API Key。")
+        st.error("请填写API Key")
         st.stop()
-
-    progress_bar = st.progress(0, text="准备就绪...")
-
-    # 1. 提取模板结构（仅第一个Sheet）
-    with st.spinner("读取模板结构..."):
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_template:
-            tmp_template.write(template_file.getbuffer())
-            tmp_template_path = tmp_template.name
+    
+    progress = st.progress(0)
+    # 1. 扫描模板结构
+    with st.spinner("解析模板结构..."):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+            tmp.write(template_file.getbuffer())
+            tmp_path = tmp.name
         try:
-            template_structure = get_template_structure(tmp_template_path)
-            st.success("模板结构读取成功")
-            with st.expander("查看模板结构（仅第一个Sheet）"):
-                st.json(template_structure)
+            structure = scan_template_structure(tmp_path)
+            st.success("模板结构识别成功")
+            with st.expander("查看识别的字段和表格"):
+                st.write("键值对字段：", list(structure['key_value_fields'].keys()))
+                for t in structure['tables']:
+                    st.write(f"表格 {t['name']} 列头：", t['headers'])
         except Exception as e:
             st.error(f"模板解析失败：{e}")
             st.stop()
-    progress_bar.progress(20, text="模板结构已读取")
-
-    # 2. 提取 PDF 文本
-    with st.spinner("读取 PDF 简历..."):
+    progress.progress(20)
+    
+    # 2. 提取PDF
+    with st.spinner("读取PDF..."):
         try:
             resume_text = extract_text_from_pdf(pdf_file)
             if not resume_text:
-                st.error("PDF 内容为空或无法解析。")
+                st.error("PDF内容为空")
                 st.stop()
         except Exception as e:
-            st.error(f"PDF 读取失败：{e}")
+            st.error(f"PDF读取失败：{e}")
             st.stop()
-    progress_bar.progress(40, text="PDF 内容提取完成")
-
-    # 3. 调用智谱AI解析
-    with st.spinner(f"正在调用智谱AI（{model_name}）解析简历..."):
+    progress.progress(40)
+    
+    # 3. AI解析
+    with st.spinner(f"调用智谱AI ({model_name}) 解析..."):
         try:
-            llm_client = ZhipuAIClient(api_key=api_key, model_name=model_name)
-            parsed_data = parse_resume_with_llm(resume_text, template_structure, llm_client)
-            st.success("AI 解析完成！")
-            with st.expander("查看 AI 提取的数据"):
+            client = ZhipuAIClient(api_key, model_name)
+            parsed_data = parse_resume_with_llm(resume_text, structure, client)
+            st.success("AI解析完成")
+            with st.expander("查看提取的数据"):
                 st.json(parsed_data)
         except Exception as e:
-            st.error(f"AI 解析失败：{e}")
+            st.error(f"AI解析失败：{e}")
             st.stop()
-    progress_bar.progress(70, text="AI 解析完成")
-
-    # 4. 填充模板并输出（仅第一个Sheet）
-    with st.spinner("生成 Excel 文件（保留原格式）..."):
+    progress.progress(70)
+    
+    # 4. 填充并导出
+    with st.spinner("生成Excel（保留格式）..."):
         try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_output:
-                output_path = tmp_output.name
-            fill_template_keep_format(tmp_template_path, parsed_data, output_path)
-            # 提供下载
-            with open(output_path, "rb") as f:
-                excel_bytes = f.read()
-            st.download_button(
-                label="📥 下载生成的 Excel 简历",
-                data=excel_bytes,
-                file_name="filled_resume.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            os.unlink(output_path)
-            os.unlink(tmp_template_path)
+            output_temp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx").name
+            fill_template_keep_format(tmp_path, parsed_data, output_temp, structure)
+            with open(output_temp, "rb") as f:
+                excel_data = f.read()
+            st.download_button("📥 下载生成的Excel", data=excel_data, file_name="filled_resume.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            os.unlink(tmp_path)
+            os.unlink(output_temp)
         except Exception as e:
-            st.error(f"生成 Excel 失败：{e}")
+            st.error(f"生成失败：{e}")
             st.stop()
-    progress_bar.progress(100, text="完成！")
+    progress.progress(100)
     st.balloons()
