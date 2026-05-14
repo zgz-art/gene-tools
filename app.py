@@ -6,31 +6,28 @@ import pdfplumber
 import openpyxl
 from openpyxl.utils import get_column_letter
 from typing import Dict, Any, List, Union
-import pandas as pd  # 仅用于辅助读取列头，不用于写入
+import pandas as pd
 from openai import OpenAI
 
 # ----------------------------- 页面配置 -----------------------------
 st.set_page_config(page_title="AI 简历解析与模板填充 (智谱AI版)", layout="wide")
-st.title("📄 AI 简历解析 → 任意 Excel 模板")
+st.title("📄 AI 简历解析 → 任意 Excel 模板 (仅使用第一个Sheet)")
 st.markdown("上传 PDF 简历和 Excel 模板，**智谱AI** 自动理解模板结构并填充内容，**保留原格式**。")
 
-# ----------------------------- 1. 模板结构提取 -----------------------------
+# ----------------------------- 1. 模板结构提取 (仅第一个Sheet) -----------------------------
 def get_template_structure(template_path: str) -> Dict[str, List[str]]:
     """
-    读取 Excel 模板的所有 Sheet，返回 {sheet_name: [列头列表]}
-    使用 openpyxl 读取第一行作为列头。
+    只读取 Excel 模板的第一个 Sheet，返回 {sheet_name: [列头列表]}
     """
     wb = openpyxl.load_workbook(template_path, data_only=True)
-    structure = {}
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-        headers = []
-        for col in range(1, ws.max_column + 1):
-            cell_value = ws.cell(row=1, column=col).value
-            if cell_value:
-                headers.append(str(cell_value).strip())
-        structure[sheet_name] = headers
-    return structure
+    sheet_name = wb.sheetnames[0]  # 只取第一个 sheet
+    ws = wb[sheet_name]
+    headers = []
+    for col in range(1, ws.max_column + 1):
+        cell_value = ws.cell(row=1, column=col).value
+        if cell_value:
+            headers.append(str(cell_value).strip())
+    return {sheet_name: headers}
 
 # ----------------------------- 2. PDF 文本提取 -----------------------------
 def extract_text_from_pdf(pdf_file) -> str:
@@ -108,48 +105,55 @@ def parse_resume_with_llm(
         raise e
     return data
 
-# ----------------------------- 5. 通用填充（保持格式，使用 openpyxl） -----------------------------
+# ----------------------------- 5. 通用填充（保持格式，仅第一个Sheet） -----------------------------
 def fill_template_keep_format(
     template_path: str,
     parsed_data: Dict[str, Union[Dict, List]],
     output_path: str
 ):
     """
-    用 openpyxl 填充数据，保留原始样式、合并单元格。
+    用 openpyxl 填充数据，保留原始样式、合并单元格。只处理模板的第一个 sheet。
     """
     wb = openpyxl.load_workbook(template_path)
-    for sheet_name, data in parsed_data.items():
-        if sheet_name not in wb.sheetnames:
-            continue
-        ws = wb[sheet_name]
-        # 获取第一行表头（非空单元格值）
-        headers = []
-        for cell in ws[1]:
-            if cell.value:
-                headers.append(str(cell.value).strip())
-        # 建立列头到列索引的映射
-        col_index = {}
-        for idx, h in enumerate(headers, start=1):
-            col_index[h] = idx
+    target_sheet_name = wb.sheetnames[0]  # 只处理第一个 sheet
+    
+    # 获取 AI 返回的对应 sheet 数据，若不存在则用空数据
+    if target_sheet_name not in parsed_data:
+        st.warning(f"AI 返回的数据中没有找到 sheet '{target_sheet_name}'，将使用空数据填充。")
+        data = {}
+    else:
+        data = parsed_data[target_sheet_name]
+    
+    ws = wb[target_sheet_name]
+    # 获取第一行表头（非空单元格值）
+    headers = []
+    for cell in ws[1]:
+        if cell.value:
+            headers.append(str(cell.value).strip())
+    # 建立列头到列索引的映射
+    col_index = {}
+    for idx, h in enumerate(headers, start=1):
+        col_index[h] = idx
 
-        # 处理单行数据（dict）
-        if isinstance(data, dict):
-            row_num = 2
-            for field, value in data.items():
+    # 处理单行数据（dict）
+    if isinstance(data, dict):
+        row_num = 2
+        for field, value in data.items():
+            if field in col_index:
+                ws.cell(row=row_num, column=col_index[field], value=value)
+    # 处理多行数据（list）
+    elif isinstance(data, list):
+        # 删除第2行及以下所有数据行（保留表头）
+        if ws.max_row >= 2:
+            ws.delete_rows(2, ws.max_row - 1)
+        # 写入新数据
+        for row_idx, record in enumerate(data, start=2):
+            for field, value in record.items():
                 if field in col_index:
-                    ws.cell(row=row_num, column=col_index[field], value=value)
-        # 处理多行数据（list）
-        elif isinstance(data, list):
-            # 删除第2行及以下所有数据行（保留表头）
-            if ws.max_row >= 2:
-                ws.delete_rows(2, ws.max_row - 1)
-            # 写入新数据
-            for row_idx, record in enumerate(data, start=2):
-                for field, value in record.items():
-                    if field in col_index:
-                        ws.cell(row=row_idx, column=col_index[field], value=value)
-        else:
-            st.warning(f"Sheet {sheet_name} 数据格式异常：{type(data)}，跳过")
+                    ws.cell(row=row_idx, column=col_index[field], value=value)
+    else:
+        st.warning(f"Sheet {target_sheet_name} 数据格式异常：{type(data)}，跳过")
+    
     wb.save(output_path)
 
 # ----------------------------- 6. Streamlit 界面（仅智谱AI） -----------------------------
@@ -164,7 +168,7 @@ with st.sidebar:
     )
     st.markdown("---")
     st.markdown("**说明**：")
-    st.markdown("- 上传任意 Excel 模板，AI 会根据列头自动填充")
+    st.markdown("- 上传任意 Excel 模板，AI 会根据**第一个Sheet的列头**自动填充")
     st.markdown("- 保留原有样式、合并单元格")
     st.markdown("- 支持多行数据（如工作经历、教育经历）")
     st.markdown("- 智谱AI新用户赠送免费额度，glm-4-flash 长期免费")
@@ -185,7 +189,7 @@ if st.button("🚀 开始解析并生成", type="primary"):
 
     progress_bar = st.progress(0, text="准备就绪...")
 
-    # 1. 提取模板结构
+    # 1. 提取模板结构（仅第一个Sheet）
     with st.spinner("读取模板结构..."):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_template:
             tmp_template.write(template_file.getbuffer())
@@ -193,7 +197,7 @@ if st.button("🚀 开始解析并生成", type="primary"):
         try:
             template_structure = get_template_structure(tmp_template_path)
             st.success("模板结构读取成功")
-            with st.expander("查看模板结构"):
+            with st.expander("查看模板结构（仅第一个Sheet）"):
                 st.json(template_structure)
         except Exception as e:
             st.error(f"模板解析失败：{e}")
@@ -225,7 +229,7 @@ if st.button("🚀 开始解析并生成", type="primary"):
             st.stop()
     progress_bar.progress(70, text="AI 解析完成")
 
-    # 4. 填充模板并输出
+    # 4. 填充模板并输出（仅第一个Sheet）
     with st.spinner("生成 Excel 文件（保留原格式）..."):
         try:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_output:
