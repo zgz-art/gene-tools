@@ -36,6 +36,19 @@ st.markdown("""
 st.title("📄 智能简历填充工具")
 st.markdown("上传您的原始简历（PDF）和简历模板（Excel），AI 将自动提取信息并生成标准格式文件。")
 
+# 侧边栏配置
+with st.sidebar:
+    st.header("⚙️ 配置")
+    api_key = st.text_input("🔑 智谱 AI API Key", type="password", help="前往 https://open.bigmodel.cn/ 获取")
+    model_name = st.selectbox(
+        "🤖 选择大模型",
+        options=["glm-4-plus", "glm-4-flash", "glm-4-air", "glm-4-long"],
+        index=0,
+        help="不同模型的速度、成本与效果有所差异，推荐使用 glm-4-plus 获得最佳提取质量"
+    )
+    st.markdown("---")
+    st.caption("需要帮助？请查看 [使用说明](https://github.com/your-repo)")
+
 with st.expander("📌 使用说明", expanded=True):
     st.markdown("""
     1. 准备 **PDF 格式** 的原始简历文件  
@@ -54,8 +67,6 @@ with col1:
     pdf_file = st.file_uploader("📂 上传 PDF 简历", type=["pdf"])
 with col2:
     excel_template = st.file_uploader("📁 上传 Excel 模板", type=["xlsx"])
-
-api_key = st.text_input("🔑 智谱 AI API Key", type="password")
 
 with st.container():
     st.subheader("补充信息（若AI未自动识别，请手动填写）")
@@ -85,7 +96,8 @@ if st.button("🚀 开始处理", type="primary"):
     
     with st.spinner("2/3 正在调用 AI 分析简历（可能需要10-30秒）..."):
         try:
-            ai_result = extract_resume_info(api_key, pdf_text)
+            # 传入模型参数
+            ai_result = extract_resume_info(api_key, pdf_text, model=model_name)
             st.success("AI 分析完成")
             # 显示提取结果预览
             with st.expander("查看 AI 提取结果"):
