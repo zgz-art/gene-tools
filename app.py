@@ -98,7 +98,7 @@ def find_row_by_keyword(worksheet, keyword):
     return None
 
 def copy_row_style(source_row, target_row, worksheet, max_col):
-    """复制源行样式（字体、边框、填充、对齐、数字格式）到目标行，不复制数据验证"""
+    """复制源行样式（字体、边框、填充、对齐、数字格式）到目标行"""
     for col in range(1, max_col + 1):
         src = worksheet.cell(source_row, col)
         tgt = worksheet.cell(target_row, col)
@@ -109,19 +109,13 @@ def copy_row_style(source_row, target_row, worksheet, max_col):
             tgt.number_format = src.number_format
             tgt.alignment = copy(src.alignment)
 
-def insert_custom_rows(worksheet, start_row, count, max_col, template_row):
-    worksheet.insert_rows(start_row, count)
-    for i in range(count):
-        new_row = start_row + i
-        copy_row_style(template_row, new_row, worksheet, max_col)
-
 def clear_row_content(worksheet, row, max_col):
     for col in range(1, max_col + 1):
         primary = get_primary_cell(worksheet, row, col)
         if primary.row == row and primary.column == col:
             primary.value = None
 
-# ==================== 填充逻辑 ====================
+# ==================== 填充逻辑（无自适应增行） ====================
 def fill_basic_info(ws, basic_data):
     for key, value in basic_data.items():
         if not value:
@@ -155,16 +149,18 @@ def fill_work_experience(ws, work_list):
         return
     header_row = keyword_row + 1
     data_start = header_row + 1
-    reserved = 3
+    reserved = 3  # 模板预留行数，用户可修改此值或通过参数传入，此处固定为3
     max_col = ws.max_column
 
+    # 清空预留区域
     for r in range(data_start, data_start + reserved):
         clear_row_content(ws, r, max_col)
 
     sorted_work = sorted(work_list, key=lambda x: x.get("开始日期", "1900-01-01"), reverse=True)
-    need = len(sorted_work)
-    if need > reserved:
-        insert_custom_rows(ws, data_start + reserved, need - reserved, max_col, data_start)
+    # 只填充前 reserved 条，超出部分忽略（用户应自行增加预留行）
+    if len(sorted_work) > reserved:
+        st.warning(f"工作经历共有 {len(sorted_work)} 条，模板仅预留 {reserved} 行，超出部分将不会被填充。请手动增加模板中的预留行数。")
+        sorted_work = sorted_work[:reserved]
 
     for idx, work in enumerate(sorted_work):
         target_row = data_start + idx
@@ -188,16 +184,16 @@ def fill_project_experience(ws, project_list):
         return
     header_row = keyword_row + 1
     data_start = header_row + 1
-    reserved = 6
+    reserved = 6  # 模板预留行数
     max_col = ws.max_column
 
     for r in range(data_start, data_start + reserved):
         clear_row_content(ws, r, max_col)
 
     sorted_proj = sorted(project_list, key=lambda x: x.get("开始日期", "1900-01-01"), reverse=True)
-    need = len(sorted_proj)
-    if need > reserved:
-        insert_custom_rows(ws, data_start + reserved, need - reserved, max_col, data_start)
+    if len(sorted_proj) > reserved:
+        st.warning(f"项目经历共有 {len(sorted_proj)} 条，模板仅预留 {reserved} 行，超出部分将不会被填充。请手动增加模板中的预留行数。")
+        sorted_proj = sorted_proj[:reserved]
 
     for idx, proj in enumerate(sorted_proj):
         target_row = data_start + idx
@@ -290,7 +286,13 @@ with st.sidebar:
     st.caption("模板中请包含：本科学历、研究生学历、工作经历（...）、项目经历（...）等关键字")
 
 with st.expander("📌 使用说明", expanded=True):
-    st.markdown("1. 准备 PDF 简历和 Excel 模板（按说明包含指定关键字）\n2. 输入智谱 API Key\n3. 可选填写供应商缩写、类型、岗位、级别\n4. 点击处理，下载填充后的 Excel（原模板格式完全保留）")
+    st.markdown("""
+    1. 准备 **PDF 简历** 和 **Excel 模板**（模板需包含指定关键字）
+    2. 输入 **智谱 API Key**
+    3. 可选填写 **供应商缩写、类型、岗位、级别**（若AI未提取到则以此处为准）
+    4. 点击 **开始处理**，等待分析完成
+    5. 点击 **下载生成的简历**（格式完全保留原模板）
+    """)
 
 col1, col2 = st.columns(2)
 with col1:
@@ -311,7 +313,7 @@ with st.container():
     st.subheader("补充信息（优先使用此处填写）")
     col_a, col_b, col_c, col_d = st.columns(4)
     with col_a:
-        supplier = st.text_input("供应商缩写 (前4字)")
+        supplier = st.text_input("供应商缩写 (前4字)", placeholder="例: 腾讯科技 -> 腾讯")
     with col_b:
         emp_type = st.selectbox("类型", ["研发", "测试"])
     with col_c:
@@ -321,30 +323,39 @@ with st.container():
 
 # 处理按钮
 if st.button("🚀 开始处理", type="primary"):
-    if not pdf_file or not excel_template or not api_key:
-        st.error("请完整填写所有必填项")
+    # 明确校验必填项
+    missing = []
+    if not pdf_file:
+        missing.append("PDF 简历文件")
+    if not excel_template:
+        missing.append("Excel 模板文件")
+    if not api_key:
+        missing.append("智谱 AI API Key")
+    
+    if missing:
+        st.error(f"❌ 缺少以下必填项：{', '.join(missing)}。请补充后重试。")
         st.stop()
 
     # 读取 PDF 内容（仅在第一次或文件变化时读取）
     if st.session_state.pdf_text is None:
-        with st.spinner("读取 PDF..."):
+        with st.spinner("正在读取 PDF 内容..."):
             st.session_state.pdf_text = extract_text_from_pdf(pdf_file)
             if not st.session_state.pdf_text.strip():
-                st.error("PDF 文本为空，请检查文件")
+                st.error("❌ PDF 文本为空，请检查文件是否包含可提取的文字（非扫描图片）。")
                 st.stop()
 
-    with st.spinner(f"调用 {model_name} 分析简历（可能需要30秒）..."):
+    with st.spinner(f"🤖 正在调用 {model_name} 分析简历（可能需要30秒）..."):
         try:
             ai_result = extract_resume_info(api_key, st.session_state.pdf_text, model_name)
             st.session_state.ai_result = ai_result
-            st.success("AI 分析完成")
+            st.success("✅ AI 分析完成")
         except Exception as e:
-            st.error(f"AI 调用失败: {e}")
+            st.error(f"❌ AI 调用失败: {str(e)}")
             st.stop()
 
 # 显示 AI 提取结果（如果存在）
 if st.session_state.ai_result is not None:
-    with st.expander("查看 AI 提取结果", expanded=True):
+    with st.expander("📋 查看 AI 提取结果", expanded=True):
         st.json(st.session_state.ai_result)
 
 # 下载按钮（仅在 AI 结果存在且模板已上传时显示）
@@ -361,8 +372,8 @@ if st.session_state.ai_result is not None and excel_template is not None:
         extra["级别"] = level
     st.session_state.ai_result["extra"] = extra
 
-    sup = extra.get("供应商缩写", "未知")[:4]
-    name = st.session_state.ai_result.get("basic", {}).get("姓名", "未知")
+    sup = extra.get("供应商缩写", "未知供应商")[:4]
+    name = st.session_state.ai_result.get("basic", {}).get("姓名", "未知姓名")
     typ = extra.get("类型", "研发")
     pos = extra.get("岗位", "java开发")
     lvl = extra.get("级别", "")
@@ -370,16 +381,16 @@ if st.session_state.ai_result is not None and excel_template is not None:
     filename = "".join(c for c in filename if c not in r'\/:*?"<>|')
 
     if st.button("📥 下载生成的简历", type="secondary"):
-        with st.spinner("填充 Excel（完全保留原格式）..."):
+        with st.spinner("📝 正在填充 Excel 模板（完全保留原格式）..."):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
                 tmp.write(excel_template.getbuffer())
                 tmp_path = tmp.name
             out_path = os.path.join(tempfile.gettempdir(), filename)
             try:
                 fill_template(tmp_path, out_path, st.session_state.ai_result)
-                st.success("填充成功！")
+                st.success("✅ 填充成功！")
             except Exception as e:
-                st.error(f"Excel 填充失败: {e}")
+                st.error(f"❌ Excel 填充失败: {str(e)}")
                 st.stop()
             finally:
                 os.unlink(tmp_path)
