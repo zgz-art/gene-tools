@@ -68,6 +68,195 @@ def extract_text_from_pdf(pdf_file) -> str:
         text += page.extract_text() + "\n"
     return text
 
+def get_write_cell(worksheet, row, col):
+    """获取可写入的单元格（如果是合并单元格，返回主单元格）"""
+    cell = worksheet.cell(row, col)
+    # 检查该单元格是否属于合并区域
+    for merged_range in worksheet.merged_cells.ranges:
+        if (merged_range.min_row <= row <= merged_range.max_row and
+            merged_range.min_col <= col <= merged_range.max_col):
+            # 返回合并区域的主单元格（左上角）
+            return worksheet.cell(merged_range.min_row, merged_range.min_col)
+    return cell
+
+def write_cell_value(worksheet, row, col, value):
+    """安全写入单元格值，自动处理合并单元格"""
+    target_cell = get_write_cell(worksheet, row, col)
+    target_cell.value = value
+
+def find_cell_by_value(worksheet, value, exact=False):
+    """遍历查找单元格（支持模糊匹配或精确匹配），返回 (row, col) 或 None"""
+    for row in worksheet.iter_rows():
+        for cell in row:
+            cell_val = cell.value
+            if cell_val is None:
+                continue
+            if exact:
+                if cell_val == value:
+                    return cell.row, cell.column
+            else:
+                if value.lower() in str(cell_val).lower():
+                    return cell.row, cell.column
+    return None
+
+def find_row_with_keyword(worksheet, keyword):
+    """返回包含关键字的行索引（行号从1开始）"""
+    for row in range(1, worksheet.max_row + 1):
+        for col in range(1, worksheet.max_column + 1):
+            val = worksheet.cell(row, col).value
+            if val and keyword in str(val):
+                return row
+    return None
+
+def copy_row_style(source_row, target_row, worksheet, max_col):
+    """复制源行样式到目标行（用于新增行时保留格式）"""
+    for col in range(1, max_col + 1):
+        source_cell = worksheet.cell(source_row, col)
+        target_cell = worksheet.cell(target_row, col)
+        if source_cell.has_style:
+            target_cell.font = copy(source_cell.font)
+            target_cell.border = copy(source_cell.border)
+            target_cell.fill = copy(source_cell.fill)
+            target_cell.number_format = copy(source_cell.number_format)
+            target_cell.alignment = copy(source_cell.alignment)
+
+def insert_rows(worksheet, start_row, count, max_col):
+    """在 start_row 之前插入 count 行，并复制 start_row 的样式"""
+    worksheet.insert_rows(start_row, count)
+    for i in range(count):
+        new_row = start_row + i
+        copy_row_style(start_row + count, new_row, worksheet, max_col)
+
+def clear_rows(worksheet, start_row, end_row, max_col):
+    """清空指定行区域的内容（保留样式）"""
+    for row in range(start_row, end_row + 1):
+        for col in range(1, max_col + 1):
+            cell = worksheet.cell(row, col)
+            if cell.value is not None:
+                # 对于合并单元格，清空主单元格即可
+                target = get_write_cell(worksheet, row, col)
+                target.value = None
+
+def fill_basic_info(worksheet, basic_data):
+    """模糊匹配基础信息字段，填充到右侧单元格（假设字段在A列，右侧B列）"""
+    for key, value in basic_data.items():
+        if not value:
+            continue
+        pos = find_cell_by_value(worksheet, key, exact=False)
+        if pos:
+            row, col = pos
+            write_cell_value(worksheet, row, col + 1, value)
+
+def fill_education_block(worksheet, keyword, edu_data):
+    """
+    精确匹配 keyword（如“本科学历”）所在行，然后处理接下来的若干行。
+    假设格式：A列为字段名，B列为待填充值。
+    edu_data 为字典，字段名与模板中的文本进行精确匹配（忽略空格）。
+    """
+    pos = find_cell_by_value(worksheet, keyword, exact=True)
+    if not pos:
+        return
+    row_start = pos[0] + 1
+    for offset in range(10):
+        current_row = row_start + offset
+        field_cell = worksheet.cell(current_row, 1)
+        if field_cell.value is None:
+            break
+        field_name = str(field_cell.value).strip()
+        for data_key, data_val in edu_data.items():
+            if data_val and data_key == field_name:
+                write_cell_value(worksheet, current_row, 2, data_val)
+                break
+
+def fill_work_experience(worksheet, work_list):
+    keyword_row = find_row_with_keyword(worksheet, "工作经历（由近及远，仅限IT相关经历）")
+    if not keyword_row:
+        return
+    header_row = keyword_row + 1
+    data_start_row = header_row + 1
+    reserved_rows = 3
+    current_data_end = data_start_row + reserved_rows - 1
+    max_col = worksheet.max_column
+    clear_rows(worksheet, data_start_row, current_data_end, max_col)
+    
+    sorted_work = sorted(work_list, key=lambda x: x.get("开始日期", "1900-01-01"), reverse=True)
+    need_rows = len(sorted_work)
+    if need_rows > reserved_rows:
+        insert_rows(worksheet, current_data_end + 1, need_rows - reserved_rows, max_col)
+    
+    for idx, work in enumerate(sorted_work):
+        target_row = data_start_row + idx
+        for col in range(1, max_col + 1):
+            header_val = worksheet.cell(header_row, col).value
+            if not header_val:
+                continue
+            if "开始日期" in str(header_val):
+                write_cell_value(worksheet, target_row, col, normalize_date(work.get("开始日期", "")))
+            elif "结束日期" in str(header_val):
+                write_cell_value(worksheet, target_row, col, normalize_date(work.get("结束日期", "")))
+            elif "单位名称" in str(header_val):
+                write_cell_value(worksheet, target_row, col, work.get("单位名称", ""))
+            elif "岗位" in str(header_val):
+                write_cell_value(worksheet, target_row, col, work.get("岗位", ""))
+
+def fill_project_experience(worksheet, project_list):
+    keyword_row = find_row_with_keyword(worksheet, "项目经历（与上述工作经历匹配，仅IT相关经历）")
+    if not keyword_row:
+        return
+    header_row = keyword_row + 1
+    data_start_row = header_row + 1
+    reserved_rows = 6
+    current_data_end = data_start_row + reserved_rows - 1
+    max_col = worksheet.max_column
+    clear_rows(worksheet, data_start_row, current_data_end, max_col)
+    
+    sorted_proj = sorted(project_list, key=lambda x: x.get("开始日期", "1900-01-01"), reverse=True)
+    need_rows = len(sorted_proj)
+    if need_rows > reserved_rows:
+        insert_rows(worksheet, current_data_end + 1, need_rows - reserved_rows, max_col)
+    
+    for idx, proj in enumerate(sorted_proj):
+        target_row = data_start_row + idx
+        for col in range(1, max_col + 1):
+            header_val = worksheet.cell(header_row, col).value
+            if not header_val:
+                continue
+            if "开始日期" in str(header_val):
+                write_cell_value(worksheet, target_row, col, normalize_date(proj.get("开始日期", "")))
+            elif "结束日期" in str(header_val):
+                write_cell_value(worksheet, target_row, col, normalize_date(proj.get("结束日期", "")))
+            elif "项目名称" in str(header_val):
+                write_cell_value(worksheet, target_row, col, proj.get("项目名称", ""))
+            elif "项目描述" in str(header_val):
+                write_cell_value(worksheet, target_row, col, proj.get("项目描述", ""))
+            elif "项目角色" in str(header_val):
+                write_cell_value(worksheet, target_row, col, proj.get("项目角色", ""))
+
+def fill_template(template_path, output_path, ai_data):
+    """主填充函数"""
+    wb = openpyxl.load_workbook(template_path)
+    ws = wb.active
+    
+    fill_basic_info(ws, ai_data.get("basic", {}))
+    
+    under = ai_data.get("education", {}).get("undergraduate", {})
+    if under:
+        fill_education_block(ws, "本科学历", under)
+    
+    post = ai_data.get("education", {}).get("postgraduate", {})
+    if post:
+        fill_education_block(ws, "研究生学历", post)
+    
+    work_list = ai_data.get("work_experience", [])
+    if work_list:
+        fill_work_experience(ws, work_list)
+    
+    proj_list = ai_data.get("project_experience", [])
+    if proj_list:
+        fill_project_experience(ws, proj_list)
+    
+    wb.save(output_path)
+
 # ==================== AI 提取函数 ====================
 SYSTEM_PROMPT = """
 你是一个专业的简历信息提取助手。请从以下简历文本中提取指定字段，并以 JSON 格式返回。
@@ -153,178 +342,6 @@ def extract_resume_info(api_key: str, pdf_text: str, model: str = "glm-4-plus") 
     result_text = response.choices[0].message.content
     data = json.loads(result_text)
     return data
-
-# ==================== Excel 填充函数 ====================
-def find_cell_by_value(worksheet, value, exact=False):
-    """遍历查找单元格（支持模糊匹配或精确匹配），返回 (row, col) 或 None"""
-    for row in worksheet.iter_rows():
-        for cell in row:
-            cell_val = cell.value
-            if cell_val is None:
-                continue
-            if exact:
-                if cell_val == value:
-                    return cell.row, cell.column
-            else:
-                if value.lower() in str(cell_val).lower():
-                    return cell.row, cell.column
-    return None
-
-def find_row_with_keyword(worksheet, keyword):
-    """返回包含关键字的行索引（行号从1开始）"""
-    for row in range(1, worksheet.max_row + 1):
-        for col in range(1, worksheet.max_column + 1):
-            val = worksheet.cell(row, col).value
-            if val and keyword in str(val):
-                return row
-    return None
-
-def copy_row_style(source_row, target_row, worksheet, max_col):
-    """复制源行样式到目标行（用于新增行时保留格式）"""
-    for col in range(1, max_col + 1):
-        source_cell = worksheet.cell(source_row, col)
-        target_cell = worksheet.cell(target_row, col)
-        if source_cell.has_style:
-            target_cell.font = copy(source_cell.font)
-            target_cell.border = copy(source_cell.border)
-            target_cell.fill = copy(source_cell.fill)
-            target_cell.number_format = copy(source_cell.number_format)
-            target_cell.alignment = copy(source_cell.alignment)
-
-def insert_rows(worksheet, start_row, count, max_col):
-    """在 start_row 之前插入 count 行，并复制 start_row 的样式"""
-    worksheet.insert_rows(start_row, count)
-    for i in range(count):
-        new_row = start_row + i
-        copy_row_style(start_row + count, new_row, worksheet, max_col)
-
-def clear_rows(worksheet, start_row, end_row, max_col):
-    """清空指定行区域的内容（保留样式）"""
-    for row in range(start_row, end_row + 1):
-        for col in range(1, max_col + 1):
-            worksheet.cell(row, col).value = None
-
-def fill_basic_info(worksheet, basic_data):
-    """模糊匹配基础信息字段，填充到右侧单元格（假设字段在A列，右侧B列）"""
-    for key, value in basic_data.items():
-        if not value:
-            continue
-        pos = find_cell_by_value(worksheet, key, exact=False)
-        if pos:
-            row, col = pos
-            target_cell = worksheet.cell(row, col + 1)
-            target_cell.value = value
-
-def fill_education_block(worksheet, keyword, edu_data):
-    """
-    精确匹配 keyword（如“本科学历”）所在行，然后处理接下来的若干行。
-    假设格式：A列为字段名，B列为待填充值。
-    edu_data 为字典，字段名与模板中的文本进行精确匹配（忽略空格）。
-    """
-    pos = find_cell_by_value(worksheet, keyword, exact=True)
-    if not pos:
-        return
-    row_start = pos[0] + 1
-    for offset in range(10):
-        current_row = row_start + offset
-        field_cell = worksheet.cell(current_row, 1)
-        if field_cell.value is None:
-            break
-        field_name = str(field_cell.value).strip()
-        for data_key, data_val in edu_data.items():
-            if data_val and data_key == field_name:
-                target_cell = worksheet.cell(current_row, 2)
-                target_cell.value = data_val
-                break
-
-def fill_work_experience(worksheet, work_list):
-    keyword_row = find_row_with_keyword(worksheet, "工作经历（由近及远，仅限IT相关经历）")
-    if not keyword_row:
-        return
-    header_row = keyword_row + 1
-    data_start_row = header_row + 1
-    reserved_rows = 3
-    current_data_end = data_start_row + reserved_rows - 1
-    max_col = worksheet.max_column
-    clear_rows(worksheet, data_start_row, current_data_end, max_col)
-    
-    sorted_work = sorted(work_list, key=lambda x: x.get("开始日期", "1900-01-01"), reverse=True)
-    need_rows = len(sorted_work)
-    if need_rows > reserved_rows:
-        insert_rows(worksheet, current_data_end + 1, need_rows - reserved_rows, max_col)
-    
-    for idx, work in enumerate(sorted_work):
-        target_row = data_start_row + idx
-        for col in range(1, max_col + 1):
-            header_val = worksheet.cell(header_row, col).value
-            if not header_val:
-                continue
-            if "开始日期" in str(header_val):
-                worksheet.cell(target_row, col).value = normalize_date(work.get("开始日期", ""))
-            elif "结束日期" in str(header_val):
-                worksheet.cell(target_row, col).value = normalize_date(work.get("结束日期", ""))
-            elif "单位名称" in str(header_val):
-                worksheet.cell(target_row, col).value = work.get("单位名称", "")
-            elif "岗位" in str(header_val):
-                worksheet.cell(target_row, col).value = work.get("岗位", "")
-
-def fill_project_experience(worksheet, project_list):
-    keyword_row = find_row_with_keyword(worksheet, "项目经历（与上述工作经历匹配，仅IT相关经历）")
-    if not keyword_row:
-        return
-    header_row = keyword_row + 1
-    data_start_row = header_row + 1
-    reserved_rows = 6
-    current_data_end = data_start_row + reserved_rows - 1
-    max_col = worksheet.max_column
-    clear_rows(worksheet, data_start_row, current_data_end, max_col)
-    
-    sorted_proj = sorted(project_list, key=lambda x: x.get("开始日期", "1900-01-01"), reverse=True)
-    need_rows = len(sorted_proj)
-    if need_rows > reserved_rows:
-        insert_rows(worksheet, current_data_end + 1, need_rows - reserved_rows, max_col)
-    
-    for idx, proj in enumerate(sorted_proj):
-        target_row = data_start_row + idx
-        for col in range(1, max_col + 1):
-            header_val = worksheet.cell(header_row, col).value
-            if not header_val:
-                continue
-            if "开始日期" in str(header_val):
-                worksheet.cell(target_row, col).value = normalize_date(proj.get("开始日期", ""))
-            elif "结束日期" in str(header_val):
-                worksheet.cell(target_row, col).value = normalize_date(proj.get("结束日期", ""))
-            elif "项目名称" in str(header_val):
-                worksheet.cell(target_row, col).value = proj.get("项目名称", "")
-            elif "项目描述" in str(header_val):
-                worksheet.cell(target_row, col).value = proj.get("项目描述", "")
-            elif "项目角色" in str(header_val):
-                worksheet.cell(target_row, col).value = proj.get("项目角色", "")
-
-def fill_template(template_path, output_path, ai_data):
-    """主填充函数"""
-    wb = openpyxl.load_workbook(template_path)
-    ws = wb.active
-    
-    fill_basic_info(ws, ai_data.get("basic", {}))
-    
-    under = ai_data.get("education", {}).get("undergraduate", {})
-    if under:
-        fill_education_block(ws, "本科学历", under)
-    
-    post = ai_data.get("education", {}).get("postgraduate", {})
-    if post:
-        fill_education_block(ws, "研究生学历", post)
-    
-    work_list = ai_data.get("work_experience", [])
-    if work_list:
-        fill_work_experience(ws, work_list)
-    
-    proj_list = ai_data.get("project_experience", [])
-    if proj_list:
-        fill_project_experience(ws, proj_list)
-    
-    wb.save(output_path)
 
 # ==================== Streamlit UI ====================
 st.title("📄 智能简历填充工具")
