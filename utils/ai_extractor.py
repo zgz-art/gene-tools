@@ -62,19 +62,19 @@ SYSTEM_PROMPT = """
         }
     ],
     "extra": {
-        "供应商缩写": "",     // 若能从文本推断则填，否则留空
-        "类型": "",          // 研发/测试
-        "岗位": "",          // java开发/前端/功能测试/性能测试
-        "级别": ""           // 例如 初级/中级/高级
+        "供应商缩写": "",
+        "类型": "",
+        "岗位": "",
+        "级别": ""
     }
 }
 """
 
-def extract_resume_info(api_key: str, pdf_text: str) -> dict:
-    """调用智谱 AI 提取信息，返回 dict"""
+def extract_resume_info(api_key: str, pdf_text: str, model: str = "glm-4-plus") -> dict:
+    """调用智谱 AI 提取信息，支持指定模型"""
     client = ZhipuAI(api_key=api_key)
     response = client.chat.completions.create(
-        model="glm-4-plus",  # 或 glm-4-flash
+        model=model,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": f"简历文本：\n{pdf_text}"}
@@ -83,6 +83,5 @@ def extract_resume_info(api_key: str, pdf_text: str) -> dict:
         response_format={"type": "json_object"}
     )
     result_text = response.choices[0].message.content
-    # 解析 JSON
     data = json.loads(result_text)
     return data
