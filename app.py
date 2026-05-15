@@ -70,13 +70,11 @@ def normalize_string(s: str) -> str:
     if not s:
         return ""
     s = str(s).strip()
-    # 移除常见标点符号
     s = re.sub(r'[：:，,。、；;]', '', s)
-    s = re.sub(r'\s+', '', s)  # 移除所有空白字符
+    s = re.sub(r'\s+', '', s)
     return s
 
 def find_cell(worksheet, value, exact=False):
-    """查找单元格，支持标准化匹配"""
     norm_value = normalize_string(value)
     for row in worksheet.iter_rows():
         for cell in row:
@@ -100,7 +98,7 @@ def find_row_by_keyword(worksheet, keyword):
     return None
 
 def copy_row_style(source_row, target_row, worksheet, max_col):
-    """复制源行所有样式及数据验证到目标行"""
+    """复制源行样式（字体、边框、填充、对齐、数字格式）到目标行，不复制数据验证"""
     for col in range(1, max_col + 1):
         src = worksheet.cell(source_row, col)
         tgt = worksheet.cell(target_row, col)
@@ -110,17 +108,6 @@ def copy_row_style(source_row, target_row, worksheet, max_col):
             tgt.fill = copy(src.fill)
             tgt.number_format = src.number_format
             tgt.alignment = copy(src.alignment)
-        # 复制数据验证（下拉框等）
-        if src.data_validation:
-            from openpyxl.worksheet.datavalidation import DataValidation
-            new_dv = DataValidation(type=src.data_validation.type,
-                                    formula1=src.data_validation.formula1,
-                                    formula2=src.data_validation.formula2,
-                                    allow_blank=src.data_validation.allow_blank,
-                                    showErrorMessage=src.data_validation.showErrorMessage,
-                                    showInputMessage=src.data_validation.showInputMessage)
-            worksheet.add_data_validation(new_dv)
-            new_dv.add(tgt)
 
 def insert_custom_rows(worksheet, start_row, count, max_col, template_row):
     worksheet.insert_rows(start_row, count)
@@ -130,7 +117,6 @@ def insert_custom_rows(worksheet, start_row, count, max_col, template_row):
 
 def clear_row_content(worksheet, row, max_col):
     for col in range(1, max_col + 1):
-        cell = worksheet.cell(row, col)
         primary = get_primary_cell(worksheet, row, col)
         if primary.row == row and primary.column == col:
             primary.value = None
@@ -150,18 +136,16 @@ def fill_education_block(ws, keyword, edu_data):
         st.warning(f"未找到关键字: {keyword}")
         return
     row_start = pos[0] + 1
-    for offset in range(15):  # 扩大搜索范围
+    for offset in range(9):
         current_row = row_start + offset
         field_cell = ws.cell(current_row, 1)
         if field_cell.value is None:
-            # 可能遇到空行，继续往下最多再找5行
             if offset > 10:
                 break
             continue
         field_name = normalize_string(field_cell.value)
         for data_key, data_val in edu_data.items():
             if data_val and normalize_string(data_key) == field_name:
-                # 写入右侧单元格（第2列），自动处理合并单元格
                 safe_write(ws, current_row, 2, data_val)
                 break
 
@@ -363,7 +347,7 @@ if st.session_state.ai_result is not None:
     with st.expander("查看 AI 提取结果", expanded=True):
         st.json(st.session_state.ai_result)
 
-# 下载按钮（仅在 AI 结果存在时显示）
+# 下载按钮（仅在 AI 结果存在且模板已上传时显示）
 if st.session_state.ai_result is not None and excel_template is not None:
     # 覆盖 extra 信息
     extra = st.session_state.ai_result.get("extra", {})
