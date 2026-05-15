@@ -541,8 +541,8 @@ if st.session_state.ai_result is not None:
             st.metric("跳槽频率", f"{score['scores']['job_hop']}/10")
             st.metric("项目清晰度", f"{score['scores']['project_clarity']}/20")
         with col2:
-            st.metric("IT工作年限", f"{score['scores']['work_years']}/15")
-            st.metric("技术栈匹配", f"{score['scores']['tech_match']}/20")
+            st.metric("IT工作年限", f"{score['scores']['work_years']}/10")
+            st.metric("技术栈匹配", f"{score['scores']['tech_match']}/25")
             st.metric("项目角色成果", f"{score['scores']['project_role']}/15")
         with col3:
             st.metric("稳定性/抗压", f"{score['scores']['stability']}/10")
