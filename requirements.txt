@@ -3,3 +3,6 @@ openpyxl>=3.1.2
 pypdf>=3.15.0
 zhipuai>=2.0.0
 pandas>=2.0.0
+sniffio
+httpx>=0.23.0
+pydantic>=1.9.0,<3.0.0
