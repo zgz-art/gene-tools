@@ -52,6 +52,8 @@ if "risk_result" not in st.session_state:
     st.session_state.risk_result = None
 if "tech_requirements" not in st.session_state:
     st.session_state.tech_requirements = ""
+if "level" not in st.session_state:
+    st.session_state.level = ""
 
 # ==================== 辅助函数 ====================
 def normalize_date(date_str: str) -> str:
@@ -324,7 +326,7 @@ SCORE_PROMPT = """你是一位资深 HR 专家，请根据以下简历信息（J
 
 评分维度及权重（总分100分）：
 1. 学历与专业匹配度（10分）：本科以上学历且专业为计算机相关得高分，如果是工学，理学，管理学和金融方向的专业中等评分，其他学科低分。
-2. IT工作年限（10分）：8年以上满分，5-8年8分，3-5年5分，3年以下3分。
+2. IT工作年限（10分）：评分跟评定级别挂钩，初级要求是1-3年，中级3-5年，高级5-8年,年限越高越好，超出上限则10分满分；如果未提供，则默认8年以上满分，5-8年8分，3-5年5分，3年以下3分。
 3. 跳槽频率（10分）：平均每份工作超过18个月满分，12-18个月8分，6-12个月5分，低于6个月2分。
 4. 技术栈匹配度（25分）：根据技能或者项目中使用到的技术与岗位要求的关键词重合度评分，同时要注意是否只罗列名词？有无项目中的实际应用描述？谨防“精通泛滥”。如果具有全栈或跨领域能力（如后端+前端、数据库+运维）也是加分项。
 **示例分析**：
@@ -356,6 +358,9 @@ SCORE_PROMPT = """你是一位资深 HR 专家，请根据以下简历信息（J
 
 客户岗位技术要求：
 {tech_requirements}
+
+评定级别：
+{level}
 """
 
 RISK_PROMPT = """你是一位专业的背景调查专家，请根据以下简历信息（JSON 格式），分析该候选人可能存在的潜在风险。
@@ -382,7 +387,7 @@ RISK_PROMPT = """你是一位专业的背景调查专家，请根据以下简历
 {resume_json}
 """
 
-def call_ai_analysis(api_key: str, model: str, prompt: str, resume_json: str, tech_requirements: str = "") -> dict:
+def call_ai_analysis(api_key: str, model: str, prompt: str, resume_json: str, tech_requirements: str = "", level: str = "") -> dict:
     """通用 AI 调用，返回解析后的 JSON"""
     client = ZhipuAI(api_key=api_key)
     # 替换提示词中的变量
@@ -390,6 +395,10 @@ def call_ai_analysis(api_key: str, model: str, prompt: str, resume_json: str, te
         prompt = prompt.replace("{tech_requirements}", tech_requirements)
     else:
         prompt = prompt.replace("{tech_requirements}", "未提供")
+	if level:
+        prompt = prompt.replace("{level}", level)
+    else:
+        prompt = prompt.replace("{level}", "未提供")
     prompt = prompt.replace("{resume_json}", resume_json)
     resp = client.chat.completions.create(
         model=model,
@@ -494,6 +503,8 @@ if st.button("🚀 开始处理", type="primary"):
         extra_hints.append("级别")
     if extra_hints:
         st.info(f"ℹ️ 以下补充信息未填写，将优先使用 AI 提取结果：{', '.join(extra_hints)}")
+	if level != st.session_state.level:
+        st.session_state.level = level
 
 # ===== 新增：显示评分与风险分析区域 =====
 if st.session_state.ai_result is not None:
@@ -518,13 +529,13 @@ if st.session_state.ai_result is not None:
                 # 评分
                 score_result = call_ai_analysis(
                     api_key, model_name, SCORE_PROMPT,
-                    resume_json, st.session_state.tech_requirements
+                    resume_json, st.session_state.tech_requirements, st.session_state.level
                 )
                 st.session_state.score_result = score_result
                 # 风险分析
                 risk_result = call_ai_analysis(
                     api_key, model_name, RISK_PROMPT,
-                    resume_json, ""
+                    resume_json, "", ""
                 )
                 st.session_state.risk_result = risk_result
                 st.success("✅ 评估完成")
