@@ -395,7 +395,7 @@ def call_ai_analysis(api_key: str, model: str, prompt: str, resume_json: str, te
         prompt = prompt.replace("{tech_requirements}", tech_requirements)
     else:
         prompt = prompt.replace("{tech_requirements}", "未提供")
-	if level:
+    if level:
         prompt = prompt.replace("{level}", level)
     else:
         prompt = prompt.replace("{level}", "未提供")
@@ -445,11 +445,13 @@ if pdf_file is not None and st.session_state.last_pdf_name != pdf_file.name:
     st.session_state.last_pdf_name = pdf_file.name
     st.session_state.score_result = None
     st.session_state.risk_result = None
+    st.session_state.level = None
 if excel_template is not None and st.session_state.last_excel_name != excel_template.name:
     st.session_state.ai_result = None
     st.session_state.last_excel_name = excel_template.name
     st.session_state.score_result = None
     st.session_state.risk_result = None
+    st.session_state.level = None
 
 with st.container():
     st.subheader("补充信息，仅用于生成excel命名，选填")
@@ -503,7 +505,7 @@ if st.button("🚀 开始处理", type="primary"):
         extra_hints.append("级别")
     if extra_hints:
         st.info(f"ℹ️ 以下补充信息未填写，将优先使用 AI 提取结果：{', '.join(extra_hints)}")
-	if level != st.session_state.level:
+    if level != st.session_state.level:
         st.session_state.level = level
 
 # ===== 新增：显示评分与风险分析区域 =====
