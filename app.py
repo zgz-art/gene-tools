@@ -467,13 +467,13 @@ with st.container():
     st.subheader("补充信息，用于生成excel命名及人员定级评分")
     col_a, col_b, col_c, col_d = st.columns(4)
     with col_a:
-        supplier = st.text_input("供应商缩写 (前4字)", placeholder="北京南天/云南南天")
+        supplier = st.text_input("供应商缩写 (前4字)", placeholder="例如：北京南天/云南南天")
     with col_b:
         emp_type = st.selectbox("类型", ["研发", "测试"])
     with col_c:
-        position = st.selectbox("岗位", ["java开发", "前端", "功能测试", "性能测试"])
+        position = st.selectbox("岗位", ["java开发", "前端开发", "Hadoop", "质量管理", "产品分析", "系统管理", "测试实施", "功能测试", "技术测试"])
     with col_d:
-        level = st.selectbox("级别", ["初级", "中级", "高级"])
+        level = st.selectbox("级别", ["初级", "中级", "高级", "专家"])
 
 # 处理按钮
 if st.button("🚀 开始处理", type="primary"):
