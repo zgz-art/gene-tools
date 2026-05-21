@@ -505,15 +505,28 @@ def classify_image_type(api_key: str, img_bytes: bytes, img_filename: str) -> st
         return None
 
 def fill_word_with_images(word_template_bytes, image_classification):
-    """将分类好的图片填充到 Word 模板中"""
+    """将分类好的图片填充到 Word 模板中（增强匹配）"""
     doc = Document(io.BytesIO(word_template_bytes))
+    
+    # 调试：打印所有段落文本（可在 Streamlit 界面看到）
+    st.write("=== Word 模板中的所有段落（调试信息）===")
+    for i, para in enumerate(doc.paragraphs):
+        st.write(f"{i}: '{para.text}'")
+    st.write("======================================")
     
     for title, (img_bytes, _) in image_classification.items():
         target_para = None
+        # 标准化标题：去除空格、统一大小写（中文无大小写）
+        title_clean = title.strip()
         for para in doc.paragraphs:
-            if title in para.text:
+            # 去除段落文本的首尾空格
+            para_text = para.text.strip()
+            # 直接匹配
+            if para_text == title_clean:
                 target_para = para
                 break
+            # 如果直接匹配失败，尝试移除加粗标记（某些情况下 `**` 会被保留在文本中？一般不会）
+            # 实际上 `para.text` 已经去除了格式标记，这里不需要额外处理
         if not target_para:
             st.warning(f"未找到标题: {title}，跳过")
             continue
@@ -549,6 +562,7 @@ def fill_word_with_images(word_template_bytes, image_classification):
                 break
         
         if not found:
+            # 在标题后插入新段落和图片
             new_para = doc.add_paragraph()
             target_para._element.addnext(new_para._element)
             run = new_para.add_run()
