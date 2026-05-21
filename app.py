@@ -1,4 +1,3 @@
-# OCR模型
 import os
 import sys
 import base64
@@ -21,14 +20,16 @@ from zhipuai import ZhipuAI
 import openpyxl
 from docx import Document
 from docx.shared import Inches, Emu
+from PIL import Image
+import numpy as np
 
-# ===== 新增：导入 PaddleOCR =====
+# ===== 替换为 RapidOCR =====
 try:
-    from paddleocr import PaddleOCR
-    PADDLEOCR_AVAILABLE = True
+    from rapidocr_onnxruntime import RapidOCR
+    RAPIDOCR_AVAILABLE = True
 except ImportError:
-    PADDLEOCR_AVAILABLE = False
-    st.warning("PaddleOCR 未安装，Word 分类功能将回退到视觉模型。请运行：pip install paddlepaddle paddleocr")
+    RAPIDOCR_AVAILABLE = False
+    st.warning("RapidOCR 未安装，Word 分类功能将不可用。请运行：pip install rapidocr-onnxruntime")
 
 # ==================== 页面配置 ====================
 st.set_page_config(page_title="简历智能填充工具", page_icon="📄", layout="wide")
@@ -473,32 +474,31 @@ def call_ai_analysis(api_key: str, model: str, prompt: str, resume_json: str, te
     )
     return json.loads(resp.choices[0].message.content)
 
-# ==================== 新增：基于 OCR 的文字提取和分类（免费高效） ====================
+# ==================== 新增：基于 RapidOCR 的文字提取和分类 ====================
 @st.cache_resource
 def init_ocr():
-    """初始化 PaddleOCR 并缓存"""
-    if PADDLEOCR_AVAILABLE:
-        return PaddleOCR(use_angle_cls=True, lang='ch', show_log=False)
+    """初始化 RapidOCR 并缓存"""
+    if RAPIDOCR_AVAILABLE:
+        return RapidOCR()
     else:
         return None
 
 def extract_text_by_ocr(img_bytes: bytes) -> str:
-    """使用 PaddleOCR 从图片中提取所有文字，返回合并后的字符串"""
-    if not PADDLEOCR_AVAILABLE:
+    """使用 RapidOCR 从图片中提取所有文字，返回合并后的字符串"""
+    if not RAPIDOCR_AVAILABLE:
         return ""
     ocr = init_ocr()
     if ocr is None:
         return ""
-    # 保存临时文件
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-        tmp.write(img_bytes)
-        tmp_path = tmp.name
+    # 将字节转换为 PIL Image，再转为 numpy 数组
     try:
-        result = ocr.ocr(tmp_path, cls=True)
-        if not result or not result[0]:
+        img = Image.open(io.BytesIO(img_bytes))
+        img_np = np.array(img)
+        result, elapse = ocr(img_np)  # RapidOCR 返回 (result, elapse)
+        if not result:
             return ""
         texts = []
-        for line in result[0]:
+        for line in result:
             text = line[1][0]
             confidence = line[1][1]
             if confidence > 0.5:
@@ -507,8 +507,6 @@ def extract_text_by_ocr(img_bytes: bytes) -> str:
     except Exception as e:
         st.warning(f"OCR 识别失败: {e}")
         return ""
-    finally:
-        os.unlink(tmp_path)
 
 def classify_image_by_text(api_key: str, ocr_text: str, img_filename: str) -> str:
     """
@@ -622,19 +620,13 @@ def fill_word_with_images(word_template_bytes, image_classification, new_title=N
     if new_title:
         if doc.paragraphs:
             first_para = doc.paragraphs[0]
-            # 保留原段落样式（如对齐方式、缩进等）
-            # 清除原有 run，重新添加带新文本的 run，并尽量继承原字体样式
-            # 获取第一个 run 的字体属性（如果存在）
             original_font = None
             if first_para.runs:
                 original_font = first_para.runs[0].font
-            # 清空所有 run
             for run in first_para.runs:
                 run.clear()
-            # 添加新 run
             new_run = first_para.add_run(new_title)
             if original_font:
-                # 复制字体：名称、大小、粗体、斜体、下划线、颜色等
                 new_run.font.name = original_font.name
                 new_run.font.size = original_font.size
                 new_run.font.bold = original_font.bold
@@ -642,49 +634,35 @@ def fill_word_with_images(word_template_bytes, image_classification, new_title=N
                 new_run.font.underline = original_font.underline
                 if original_font.color and original_font.color.rgb:
                     new_run.font.color.rgb = original_font.color.rgb
-            # 如果原段落有居中/左对齐等，保持不变（段落属性本身不会丢失）
     for title, (img_bytes, _) in image_classification.items():
         found = False
-        # 遍历所有表格
         for table in doc.tables:
-            # 遍历行，使用 enumerate 获取行索引
             for row_idx, row in enumerate(table.rows):
-                # 遍历列，使用 enumerate 获取列索引
                 for col_idx, cell in enumerate(row.cells):
                     if title in cell.text:
-                        # 确定目标单元格：优先取下一行同一列单元格
                         if row_idx + 1 < len(table.rows):
                             target_cell = table.cell(row_idx + 1, col_idx)
                         else:
                             target_cell = cell
-                        
-                        # 清空目标单元格中的所有图片（删除 w:drawing 元素）
                         for para in target_cell.paragraphs:
                             drawings = para._element.xpath('.//w:drawing')
                             for draw in drawings:
                                 draw.getparent().remove(draw)
-                        
-                        # 插入新图片
-                        # 确保至少有一个段落可用
                         if target_cell.paragraphs:
                             para = target_cell.paragraphs[0]
                         else:
                             para = target_cell.add_paragraph()
                         run = para.add_run()
                         img_stream = io.BytesIO(img_bytes)
-                        # 设置图片宽度为 5 英寸（高度自适应），可根据需要调整
                         run.add_picture(img_stream, width=Inches(5.0))
-                        
                         found = True
                         break
                 if found:
                     break
             if found:
                 break
-        
         if not found:
             st.warning(f"未在表格中找到标题: {title}，请检查模板中的文字是否完全匹配")
-    
     output = io.BytesIO()
     doc.save(output)
     output.seek(0)
@@ -962,17 +940,17 @@ if st.session_state.ai_result is not None and excel_template is not None:
             st.download_button("📥 点击下载文件", f, file_name=filename, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         os.unlink(out_path)
 
-# ----------------- Word 模板图片填充功能（独立，使用 OCR + 文本分类） -----------------
+# ----------------- Word 模板图片填充功能（独立，使用 RapidOCR + 文本分类） -----------------
 if word_template is not None and image_files:
     st.markdown("---")
-    st.subheader("📄 Word 证件照自动填充（基于 OCR 文字识别，免费高效）")
-    st.caption("系统将使用 PaddleOCR 提取图片文字，再根据文字内容自动分类，并填充到 Word 模板对应标题下方。")
+    st.subheader("📄 Word 证件照自动填充（基于 RapidOCR 文字识别，免费高效）")
+    st.caption("系统将使用 RapidOCR 提取图片文字，再根据文字内容自动分类，并填充到 Word 模板对应标题下方。")
     
     if st.button("✨ 开始填充 Word 模板（OCR分类）", key="fill_word_btn_ocr"):
         if not api_key:
             st.error("请先在左侧边栏输入智谱 AI API Key")
-        elif not PADDLEOCR_AVAILABLE:
-            st.error("PaddleOCR 未安装，请运行：pip install paddlepaddle paddleocr")
+        elif not RAPIDOCR_AVAILABLE:
+            st.error("RapidOCR 未安装，请运行：pip install rapidocr-onnxruntime")
         else:
             # 从 session_state 中获取必要的命名信息（若无 AI 结果则使用默认值）
             if st.session_state.ai_result is not None:
@@ -988,18 +966,15 @@ if word_template is not None and image_files:
                 pos = position if position else "java开发"
                 lvl = level if level else ""
             
-            # 对每张图片进行 OCR 提取 + 文本分类
             classified = {}
             progress_bar = st.progress(0)
             total = len(image_files)
             for i, img_file in enumerate(image_files):
                 img_bytes = img_file.getvalue()
-                # OCR 提取文字
                 ocr_text = extract_text_by_ocr(img_bytes)
                 if not ocr_text.strip():
                     st.warning(f"图片 {img_file.name} OCR 未提取到文字，跳过")
                 else:
-                    # 基于文字分类
                     img_type = classify_image_by_text(api_key, ocr_text, img_file.name)
                     st.write(f"图片 {img_file.name} -> OCR 文字片段：{ocr_text[:100]}... -> 分类为: {img_type}")
                     if img_type:
@@ -1018,7 +993,7 @@ if word_template is not None and image_files:
                         new_title = f"{sup}-{name}-{pos}-{lvl}-个人资料"
                         output_bytes = fill_word_with_images(word_bytes, classified, new_title=new_title)
                         word_filename = f"{sup}-{name}-{pos}-{lvl}-资料.docx"
-                        word_filename = "".join(c for c in word_filename if c not in r'\/:*?"<>|")
+                        word_filename = "".join(c for c in word_filename if c not in r'\/:*?"<>|')
                         st.success("✅ Word 填充成功！")
                         st.download_button(
                             label="📥 下载填充后的 Word 文件",
