@@ -1,3 +1,9 @@
+import streamlit as st
+
+# 必须是第一个 Streamlit 命令
+st.set_page_config(page_title="简历智能填充工具", page_icon="📄", layout="wide")
+
+# 然后导入其他所有库
 import os
 import sys
 import base64
@@ -14,7 +20,6 @@ sys.stderr.reconfigure(encoding='utf-8')
 os.environ["PYTHONIOENCODING"] = "utf-8"
 os.environ["LANG"] = "zh_CN.UTF-8"
 
-import streamlit as st
 import pypdf
 from zhipuai import ZhipuAI
 import openpyxl
@@ -23,21 +28,18 @@ from docx.shared import Inches, Emu
 from PIL import Image
 import numpy as np
 
-# ---- 尝试导入 RapidOCR，但不立即调用 st.warning ----
+# 尝试导入 RapidOCR
 try:
     from rapidocr_onnxruntime import RapidOCR
     RAPIDOCR_AVAILABLE = True
 except ImportError:
     RAPIDOCR_AVAILABLE = False
-    # 注意：此处不能调用 st.warning，因为 st.set_page_config 尚未执行
+    # 注意：此时可以安全使用 st.warning，因为 set_page_config 已经执行
 
-# ==================== 页面配置（必须第一个 Streamlit 命令） ====================
-st.set_page_config(page_title="简历智能填充工具", page_icon="📄", layout="wide")
-
-# ==================== 现在可以安全使用 st 命令 ====================
 if not RAPIDOCR_AVAILABLE:
     st.warning("⚠️ RapidOCR 未安装，Word 填充功能将不可用。请运行：pip install rapidocr-onnxruntime")
 
+# ==================== 页面样式 ====================
 st.markdown("""
 <style>
     .stButton button { background-color: #4CAF50; color: white; border-radius: 8px; }
@@ -940,7 +942,7 @@ if st.session_state.ai_result is not None and excel_template is not None:
             st.download_button("📥 点击下载文件", f, file_name=filename, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         os.unlink(out_path)
 
-# ----------------- Word 模板图片填充功能（独立，使用 RapidOCR + 文本分类） -----------------
+# ----------------- Word 模板图片填充功能 -----------------
 if word_template is not None and image_files:
     st.markdown("---")
     st.subheader("📄 Word 证件照自动填充（基于 RapidOCR 文字识别，免费高效）")
@@ -952,7 +954,7 @@ if word_template is not None and image_files:
         elif not RAPIDOCR_AVAILABLE:
             st.error("RapidOCR 未安装，请运行：pip install rapidocr-onnxruntime")
         else:
-            # 从 session_state 中获取必要的命名信息（若无 AI 结果则使用默认值）
+            # 从 session_state 中获取必要的命名信息
             if st.session_state.ai_result is not None:
                 extra = st.session_state.ai_result.get("extra", {})
                 basic = st.session_state.ai_result.get("basic", {})
