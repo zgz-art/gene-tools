@@ -104,7 +104,7 @@ def extract_text_from_images(api_key: str, model: str, image_files) -> str:
     if not image_files:
         return ""
     client = ZhipuAI(api_key=api_key)
-    vision_model = "glm-4v-flash"
+    vision_model = "glm-4v-plus"
     all_texts = []
     for img_file in image_files:
         img_bytes = img_file.read()
@@ -505,7 +505,7 @@ def classify_image_type(api_key: str, img_bytes: bytes, img_filename: str) -> st
     ]
     try:
         response = client.chat.completions.create(
-            model="glm-4v-flash",
+            model="glm-4v-plus",
             messages=messages,
             temperature=0.0,
         )
