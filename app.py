@@ -871,6 +871,9 @@ if word_template is not None and image_files:
             for i, img_file in enumerate(image_files):
                 img_bytes = img_file.getvalue()
                 img_type = classify_image_type(api_key, img_bytes, img_file.name)
+                # ========== 添加以下两行调试代码 ==========
+                st.write(f"图片 {img_file.name} -> 识别为: {img_type}")
+                # ========================================
                 if img_type:
                     classified[img_type] = (img_bytes, img_file.name)
                 else:
