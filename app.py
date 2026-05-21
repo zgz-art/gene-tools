@@ -23,16 +23,20 @@ from docx.shared import Inches, Emu
 from PIL import Image
 import numpy as np
 
-# ===== 替换为 RapidOCR =====
+# ---- 尝试导入 RapidOCR，但不立即调用 st.warning ----
 try:
     from rapidocr_onnxruntime import RapidOCR
     RAPIDOCR_AVAILABLE = True
 except ImportError:
     RAPIDOCR_AVAILABLE = False
-    st.warning("RapidOCR 未安装，Word 分类功能将不可用。请运行：pip install rapidocr-onnxruntime")
+    # 注意：此处不能调用 st.warning，因为 st.set_page_config 尚未执行
 
-# ==================== 页面配置 ====================
+# ==================== 页面配置（必须第一个 Streamlit 命令） ====================
 st.set_page_config(page_title="简历智能填充工具", page_icon="📄", layout="wide")
+
+# ==================== 现在可以安全使用 st 命令 ====================
+if not RAPIDOCR_AVAILABLE:
+    st.warning("⚠️ RapidOCR 未安装，Word 填充功能将不可用。请运行：pip install rapidocr-onnxruntime")
 
 st.markdown("""
 <style>
@@ -490,11 +494,10 @@ def extract_text_by_ocr(img_bytes: bytes) -> str:
     ocr = init_ocr()
     if ocr is None:
         return ""
-    # 将字节转换为 PIL Image，再转为 numpy 数组
     try:
         img = Image.open(io.BytesIO(img_bytes))
         img_np = np.array(img)
-        result, elapse = ocr(img_np)  # RapidOCR 返回 (result, elapse)
+        result, elapse = ocr(img_np)
         if not result:
             return ""
         texts = []
@@ -556,7 +559,7 @@ OCR提取的文字内容：
         st.warning(f"基于文字的分类失败: {e}")
         return None
 
-# ==================== 保留原有的视觉分类函数（未使用但保留） ====================
+# ==================== 保留原有的视觉分类函数（备用，未使用但保留） ====================
 def classify_image_type(api_key: str, img_bytes: bytes, img_filename: str) -> str:
     """调用智谱视觉模型判断图片属于哪种证件类型（保留原有逻辑）"""
     client = ZhipuAI(api_key=api_key)
@@ -612,9 +615,6 @@ def classify_image_type(api_key: str, img_bytes: bytes, img_filename: str) -> st
 
 def fill_word_with_images(word_template_bytes, image_classification, new_title=None):
     """将分类好的图片填充到 Word 模板中（适配表格结构：标题行 + 图片行）"""
-    from docx.shared import Inches
-    import io
-
     doc = Document(io.BytesIO(word_template_bytes))
     # 如果需要修改标题，处理第一个段落
     if new_title:
