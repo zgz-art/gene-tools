@@ -506,37 +506,43 @@ def classify_image_type(api_key: str, img_bytes: bytes, img_filename: str) -> st
 
 def fill_word_with_images(word_template_bytes, image_classification):
     """将分类好的图片填充到 Word 模板中（适配表格结构：标题行 + 图片行）"""
+    from docx.shared import Inches
+    import io
+
     doc = Document(io.BytesIO(word_template_bytes))
     
     for title, (img_bytes, _) in image_classification.items():
         found = False
         # 遍历所有表格
         for table in doc.tables:
-            # 遍历表格行，寻找包含标题的单元格
-            for row in table.rows:
+            # 遍历行，使用 enumerate 获取行索引
+            for row_idx, row in enumerate(table.rows):
                 for cell in row.cells:
                     if title in cell.text:
-                        # 找到标题行，假设图片在下一行同一列
-                        row_idx = table.rows.index(row)
+                        # 找到标题单元格。通常图片在下一行的同一列，或者就在当前单元格内。
+                        # 策略：优先尝试取下一行同一列单元格；若不存在，则使用当前单元格（并清空原内容）。
                         if row_idx + 1 < len(table.rows):
                             target_cell = table.cell(row_idx + 1, cell.column_index)
                         else:
-                            # 如果没有下一行，则使用当前单元格（将在下方插入新段落）
                             target_cell = cell
                         
-                        # 清空目标单元格中的原有图片（删除所有drawing）
+                        # 清空目标单元格中的所有图片（删除 w:drawing 元素）
                         for para in target_cell.paragraphs:
                             drawings = para._element.xpath('.//w:drawing')
                             for draw in drawings:
                                 draw.getparent().remove(draw)
-                        # 插入新图片（取第一个段落，或新建段落）
+                        
+                        # 插入新图片
+                        # 确保至少有一个段落可用
                         if target_cell.paragraphs:
                             para = target_cell.paragraphs[0]
                         else:
                             para = target_cell.add_paragraph()
                         run = para.add_run()
                         img_stream = io.BytesIO(img_bytes)
-                        run.add_picture(img_stream, width=Inches(5.0))  # 可调整宽度
+                        # 设置图片宽度为 5 英寸（高度自适应），可根据需要调整
+                        run.add_picture(img_stream, width=Inches(5.0))
+                        
                         found = True
                         break
                 if found:
