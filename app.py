@@ -1,9 +1,3 @@
-import streamlit as st
-
-# 必须是第一个 Streamlit 命令
-st.set_page_config(page_title="简历智能填充工具", page_icon="📄", layout="wide")
-
-# 然后导入其他所有库
 import os
 import sys
 import base64
@@ -20,26 +14,16 @@ sys.stderr.reconfigure(encoding='utf-8')
 os.environ["PYTHONIOENCODING"] = "utf-8"
 os.environ["LANG"] = "zh_CN.UTF-8"
 
+import streamlit as st
 import pypdf
 from zhipuai import ZhipuAI
 import openpyxl
 from docx import Document
 from docx.shared import Inches, Emu
-from PIL import Image
-import numpy as np
 
-# 尝试导入 RapidOCR
-try:
-    from rapidocr_onnxruntime import RapidOCR
-    RAPIDOCR_AVAILABLE = True
-except ImportError:
-    RAPIDOCR_AVAILABLE = False
-    # 注意：此时可以安全使用 st.warning，因为 set_page_config 已经执行
+# ==================== 页面配置 ====================
+st.set_page_config(page_title="简历智能填充工具", page_icon="📄", layout="wide")
 
-if not RAPIDOCR_AVAILABLE:
-    st.warning("⚠️ RapidOCR 未安装，Word 填充功能将不可用。请运行：pip install rapidocr-onnxruntime")
-
-# ==================== 页面样式 ====================
 st.markdown("""
 <style>
     .stButton button { background-color: #4CAF50; color: white; border-radius: 8px; }
@@ -480,90 +464,9 @@ def call_ai_analysis(api_key: str, model: str, prompt: str, resume_json: str, te
     )
     return json.loads(resp.choices[0].message.content)
 
-# ==================== 新增：基于 RapidOCR 的文字提取和分类 ====================
-@st.cache_resource
-def init_ocr():
-    """初始化 RapidOCR 并缓存"""
-    if RAPIDOCR_AVAILABLE:
-        return RapidOCR()
-    else:
-        return None
-
-def extract_text_by_ocr(img_bytes: bytes) -> str:
-    """使用 RapidOCR 从图片中提取所有文字，返回合并后的字符串"""
-    if not RAPIDOCR_AVAILABLE:
-        return ""
-    ocr = init_ocr()
-    if ocr is None:
-        return ""
-    try:
-        img = Image.open(io.BytesIO(img_bytes))
-        img_np = np.array(img)
-        result, elapse = ocr(img_np)
-        if not result:
-            return ""
-        texts = []
-        for line in result:
-            text = line[1][0]
-            confidence = line[1][1]
-            if confidence > 0.5:
-                texts.append(text)
-        return " ".join(texts)
-    except Exception as e:
-        st.warning(f"OCR 识别失败: {e}")
-        return ""
-
-def classify_image_by_text(api_key: str, ocr_text: str, img_filename: str) -> str:
-    """
-    基于 OCR 提取的文字内容，调用大模型判断证件类型
-    使用免费的 glm-4-flash 模型
-    """
-    if not ocr_text.strip():
-        return None
-    client = ZhipuAI(api_key=api_key)
-    types = [
-        "身份证正面照片",
-        "身份证反面照片",
-        "毕业证照片",
-        "学位证照片",
-        "学信网学历证书电子备案截图",
-        "学信网学位证书电子备案截图"
-    ]
-    options = "\n".join([f"- {t}" for t in types])
-    prompt = f"""请根据以下从图片中OCR识别出的文字内容，判断这张图片属于以下哪种证件类型：
-{options}
-
-OCR提取的文字内容：
-{ocr_text}
-
-区分要点：
-- "身份证正面照片"：包含人像、姓名、性别、民族、出生日期、住址、公民身份号码。
-- "身份证反面照片"：包含签发机关、有效期限。
-- "毕业证照片"：有“毕业证书”字样、学校名称、专业、毕业时间。
-- "学位证照片"：有“学位证书”字样、学位级别、学科名称。
-- "学信网学历证书电子备案截图"：有“教育部学历证书电子注册备案表”标题，包含姓名、毕业院校、专业、学历层次等。
-- "学信网学位证书电子备案截图"：有“中国高等教育学位在线验证报告”标题，包含姓名、学位授予单位、学科名称等。
-
-只输出证件类型名称，不要输出任何其他内容。如果无法确定，输出“未知”。
-"""
-    try:
-        response = client.chat.completions.create(
-            model="glm-4-flash",  # 免费模型
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-        )
-        result = response.choices[0].message.content.strip()
-        if result in types:
-            return result
-        else:
-            return None
-    except Exception as e:
-        st.warning(f"基于文字的分类失败: {e}")
-        return None
-
-# ==================== 保留原有的视觉分类函数（备用，未使用但保留） ====================
+# ==================== 新增：Word 图片填充相关函数 ====================
 def classify_image_type(api_key: str, img_bytes: bytes, img_filename: str) -> str:
-    """调用智谱视觉模型判断图片属于哪种证件类型（保留原有逻辑）"""
+    """调用智谱视觉模型判断图片属于哪种证件类型"""
     client = ZhipuAI(api_key=api_key)
     img_base64 = base64.b64encode(img_bytes).decode('utf-8')
     mime_type = "image/jpeg"
@@ -617,18 +520,27 @@ def classify_image_type(api_key: str, img_bytes: bytes, img_filename: str) -> st
 
 def fill_word_with_images(word_template_bytes, image_classification, new_title=None):
     """将分类好的图片填充到 Word 模板中（适配表格结构：标题行 + 图片行）"""
+    from docx.shared import Inches
+    import io
+
     doc = Document(io.BytesIO(word_template_bytes))
     # 如果需要修改标题，处理第一个段落
     if new_title:
         if doc.paragraphs:
             first_para = doc.paragraphs[0]
+            # 保留原段落样式（如对齐方式、缩进等）
+            # 清除原有 run，重新添加带新文本的 run，并尽量继承原字体样式
+            # 获取第一个 run 的字体属性（如果存在）
             original_font = None
             if first_para.runs:
                 original_font = first_para.runs[0].font
+            # 清空所有 run
             for run in first_para.runs:
                 run.clear()
+            # 添加新 run
             new_run = first_para.add_run(new_title)
             if original_font:
+                # 复制字体：名称、大小、粗体、斜体、下划线、颜色等
                 new_run.font.name = original_font.name
                 new_run.font.size = original_font.size
                 new_run.font.bold = original_font.bold
@@ -636,35 +548,49 @@ def fill_word_with_images(word_template_bytes, image_classification, new_title=N
                 new_run.font.underline = original_font.underline
                 if original_font.color and original_font.color.rgb:
                     new_run.font.color.rgb = original_font.color.rgb
+            # 如果原段落有居中/左对齐等，保持不变（段落属性本身不会丢失）
     for title, (img_bytes, _) in image_classification.items():
         found = False
+        # 遍历所有表格
         for table in doc.tables:
+            # 遍历行，使用 enumerate 获取行索引
             for row_idx, row in enumerate(table.rows):
+                # 遍历列，使用 enumerate 获取列索引
                 for col_idx, cell in enumerate(row.cells):
                     if title in cell.text:
+                        # 确定目标单元格：优先取下一行同一列单元格
                         if row_idx + 1 < len(table.rows):
                             target_cell = table.cell(row_idx + 1, col_idx)
                         else:
                             target_cell = cell
+                        
+                        # 清空目标单元格中的所有图片（删除 w:drawing 元素）
                         for para in target_cell.paragraphs:
                             drawings = para._element.xpath('.//w:drawing')
                             for draw in drawings:
                                 draw.getparent().remove(draw)
+                        
+                        # 插入新图片
+                        # 确保至少有一个段落可用
                         if target_cell.paragraphs:
                             para = target_cell.paragraphs[0]
                         else:
                             para = target_cell.add_paragraph()
                         run = para.add_run()
                         img_stream = io.BytesIO(img_bytes)
+                        # 设置图片宽度为 5 英寸（高度自适应），可根据需要调整
                         run.add_picture(img_stream, width=Inches(5.0))
+                        
                         found = True
                         break
                 if found:
                     break
             if found:
                 break
+        
         if not found:
             st.warning(f"未在表格中找到标题: {title}，请检查模板中的文字是否完全匹配")
+    
     output = io.BytesIO()
     doc.save(output)
     output.seek(0)
@@ -942,57 +868,40 @@ if st.session_state.ai_result is not None and excel_template is not None:
             st.download_button("📥 点击下载文件", f, file_name=filename, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         os.unlink(out_path)
 
-# ----------------- Word 模板图片填充功能 -----------------
+# ----------------- Word 模板图片填充功能（独立） -----------------
 if word_template is not None and image_files:
     st.markdown("---")
-    st.subheader("📄 Word 证件照自动填充（基于 RapidOCR 文字识别，免费高效）")
-    st.caption("系统将使用 RapidOCR 提取图片文字，再根据文字内容自动分类，并填充到 Word 模板对应标题下方。")
+    st.subheader("📄 Word 证件照自动填充（AI 自动识别图片类型）")
+    st.caption("系统将自动识别您上传的个人资料图片的证件类型，并填充到 Word 模板对应标题下方。")
     
-    if st.button("✨ 开始填充 Word 模板（OCR分类）", key="fill_word_btn_ocr"):
+    if st.button("✨ 开始填充 Word 模板", key="fill_word_btn"):
         if not api_key:
             st.error("请先在左侧边栏输入智谱 AI API Key")
-        elif not RAPIDOCR_AVAILABLE:
-            st.error("RapidOCR 未安装，请运行：pip install rapidocr-onnxruntime")
         else:
-            # 从 session_state 中获取必要的命名信息
-            if st.session_state.ai_result is not None:
-                extra = st.session_state.ai_result.get("extra", {})
-                basic = st.session_state.ai_result.get("basic", {})
-                sup = extra.get("供应商缩写", supplier)[:4] if not supplier else supplier[:4]
-                name = basic.get("姓名", "未知")
-                pos = extra.get("岗位", position) if not position else position
-                lvl = extra.get("级别", level) if not level else level
-            else:
-                sup = supplier[:4] if supplier else "未知"
-                name = "未知"
-                pos = position if position else "java开发"
-                lvl = level if level else ""
-            
+            # 对每张图片进行 AI 分类
             classified = {}
             progress_bar = st.progress(0)
             total = len(image_files)
             for i, img_file in enumerate(image_files):
                 img_bytes = img_file.getvalue()
-                ocr_text = extract_text_by_ocr(img_bytes)
-                if not ocr_text.strip():
-                    st.warning(f"图片 {img_file.name} OCR 未提取到文字，跳过")
+                img_type = classify_image_type(api_key, img_bytes, img_file.name)
+                # ========== 添加以下两行调试代码 ==========
+                st.write(f"图片 {img_file.name} -> 识别为: {img_type}")
+                # ========================================
+                if img_type:
+                    classified[img_type] = (img_bytes, img_file.name)
                 else:
-                    img_type = classify_image_by_text(api_key, ocr_text, img_file.name)
-                    st.write(f"图片 {img_file.name} -> OCR 文字片段：{ocr_text[:100]}... -> 分类为: {img_type}")
-                    if img_type:
-                        classified[img_type] = (img_bytes, img_file.name)
-                    else:
-                        st.warning(f"无法根据文字识别图片 {img_file.name} 的证件类型，已跳过")
+                    st.warning(f"无法识别图片 {img_file.name} 的证件类型，已跳过")
                 progress_bar.progress((i+1)/total)
             progress_bar.empty()
             
             if not classified:
-                st.error("未能识别任何有效证件图片，请确保图片清晰且包含足够的文字信息。")
+                st.error("未能识别任何有效证件图片，请确保图片清晰且包含所需的证件类型。")
             else:
-                with st.spinner("正在填充 Word 模板并修改标题..."):
+                with st.spinner("正在填充 Word 模板..."):
                     try:
                         word_bytes = word_template.getvalue()
-                        new_title = f"{sup}-{name}-{pos}-{lvl}-个人资料"
+                        new_title = f"{sup}-{name}-{pos}-{lvl}-个人资料"  # 第一行文字改为文件名
                         output_bytes = fill_word_with_images(word_bytes, classified, new_title=new_title)
                         word_filename = f"{sup}-{name}-{pos}-{lvl}-资料.docx"
                         word_filename = "".join(c for c in word_filename if c not in r'\/:*?"<>|')
