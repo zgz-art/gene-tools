@@ -1,3 +1,4 @@
+# OCR模型
 import os
 import sys
 import base64
@@ -20,6 +21,14 @@ from zhipuai import ZhipuAI
 import openpyxl
 from docx import Document
 from docx.shared import Inches, Emu
+
+# ===== 新增：导入 PaddleOCR =====
+try:
+    from paddleocr import PaddleOCR
+    PADDLEOCR_AVAILABLE = True
+except ImportError:
+    PADDLEOCR_AVAILABLE = False
+    st.warning("PaddleOCR 未安装，Word 分类功能将回退到视觉模型。请运行：pip install paddlepaddle paddleocr")
 
 # ==================== 页面配置 ====================
 st.set_page_config(page_title="简历智能填充工具", page_icon="📄", layout="wide")
@@ -464,9 +473,94 @@ def call_ai_analysis(api_key: str, model: str, prompt: str, resume_json: str, te
     )
     return json.loads(resp.choices[0].message.content)
 
-# ==================== 新增：Word 图片填充相关函数 ====================
+# ==================== 新增：基于 OCR 的文字提取和分类（免费高效） ====================
+@st.cache_resource
+def init_ocr():
+    """初始化 PaddleOCR 并缓存"""
+    if PADDLEOCR_AVAILABLE:
+        return PaddleOCR(use_angle_cls=True, lang='ch', show_log=False)
+    else:
+        return None
+
+def extract_text_by_ocr(img_bytes: bytes) -> str:
+    """使用 PaddleOCR 从图片中提取所有文字，返回合并后的字符串"""
+    if not PADDLEOCR_AVAILABLE:
+        return ""
+    ocr = init_ocr()
+    if ocr is None:
+        return ""
+    # 保存临时文件
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+        tmp.write(img_bytes)
+        tmp_path = tmp.name
+    try:
+        result = ocr.ocr(tmp_path, cls=True)
+        if not result or not result[0]:
+            return ""
+        texts = []
+        for line in result[0]:
+            text = line[1][0]
+            confidence = line[1][1]
+            if confidence > 0.5:
+                texts.append(text)
+        return " ".join(texts)
+    except Exception as e:
+        st.warning(f"OCR 识别失败: {e}")
+        return ""
+    finally:
+        os.unlink(tmp_path)
+
+def classify_image_by_text(api_key: str, ocr_text: str, img_filename: str) -> str:
+    """
+    基于 OCR 提取的文字内容，调用大模型判断证件类型
+    使用免费的 glm-4-flash 模型
+    """
+    if not ocr_text.strip():
+        return None
+    client = ZhipuAI(api_key=api_key)
+    types = [
+        "身份证正面照片",
+        "身份证反面照片",
+        "毕业证照片",
+        "学位证照片",
+        "学信网学历证书电子备案截图",
+        "学信网学位证书电子备案截图"
+    ]
+    options = "\n".join([f"- {t}" for t in types])
+    prompt = f"""请根据以下从图片中OCR识别出的文字内容，判断这张图片属于以下哪种证件类型：
+{options}
+
+OCR提取的文字内容：
+{ocr_text}
+
+区分要点：
+- "身份证正面照片"：包含人像、姓名、性别、民族、出生日期、住址、公民身份号码。
+- "身份证反面照片"：包含签发机关、有效期限。
+- "毕业证照片"：有“毕业证书”字样、学校名称、专业、毕业时间。
+- "学位证照片"：有“学位证书”字样、学位级别、学科名称。
+- "学信网学历证书电子备案截图"：有“教育部学历证书电子注册备案表”标题，包含姓名、毕业院校、专业、学历层次等。
+- "学信网学位证书电子备案截图"：有“中国高等教育学位在线验证报告”标题，包含姓名、学位授予单位、学科名称等。
+
+只输出证件类型名称，不要输出任何其他内容。如果无法确定，输出“未知”。
+"""
+    try:
+        response = client.chat.completions.create(
+            model="glm-4-flash",  # 免费模型
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+        )
+        result = response.choices[0].message.content.strip()
+        if result in types:
+            return result
+        else:
+            return None
+    except Exception as e:
+        st.warning(f"基于文字的分类失败: {e}")
+        return None
+
+# ==================== 保留原有的视觉分类函数（未使用但保留） ====================
 def classify_image_type(api_key: str, img_bytes: bytes, img_filename: str) -> str:
-    """调用智谱视觉模型判断图片属于哪种证件类型"""
+    """调用智谱视觉模型判断图片属于哪种证件类型（保留原有逻辑）"""
     client = ZhipuAI(api_key=api_key)
     img_base64 = base64.b64encode(img_bytes).decode('utf-8')
     mime_type = "image/jpeg"
@@ -868,43 +962,63 @@ if st.session_state.ai_result is not None and excel_template is not None:
             st.download_button("📥 点击下载文件", f, file_name=filename, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         os.unlink(out_path)
 
-# ----------------- Word 模板图片填充功能（独立） -----------------
+# ----------------- Word 模板图片填充功能（独立，使用 OCR + 文本分类） -----------------
 if word_template is not None and image_files:
     st.markdown("---")
-    st.subheader("📄 Word 证件照自动填充（AI 自动识别图片类型）")
-    st.caption("系统将自动识别您上传的个人资料图片的证件类型，并填充到 Word 模板对应标题下方。")
+    st.subheader("📄 Word 证件照自动填充（基于 OCR 文字识别，免费高效）")
+    st.caption("系统将使用 PaddleOCR 提取图片文字，再根据文字内容自动分类，并填充到 Word 模板对应标题下方。")
     
-    if st.button("✨ 开始填充 Word 模板", key="fill_word_btn"):
+    if st.button("✨ 开始填充 Word 模板（OCR分类）", key="fill_word_btn_ocr"):
         if not api_key:
             st.error("请先在左侧边栏输入智谱 AI API Key")
+        elif not PADDLEOCR_AVAILABLE:
+            st.error("PaddleOCR 未安装，请运行：pip install paddlepaddle paddleocr")
         else:
-            # 对每张图片进行 AI 分类
+            # 从 session_state 中获取必要的命名信息（若无 AI 结果则使用默认值）
+            if st.session_state.ai_result is not None:
+                extra = st.session_state.ai_result.get("extra", {})
+                basic = st.session_state.ai_result.get("basic", {})
+                sup = extra.get("供应商缩写", supplier)[:4] if not supplier else supplier[:4]
+                name = basic.get("姓名", "未知")
+                pos = extra.get("岗位", position) if not position else position
+                lvl = extra.get("级别", level) if not level else level
+            else:
+                sup = supplier[:4] if supplier else "未知"
+                name = "未知"
+                pos = position if position else "java开发"
+                lvl = level if level else ""
+            
+            # 对每张图片进行 OCR 提取 + 文本分类
             classified = {}
             progress_bar = st.progress(0)
             total = len(image_files)
             for i, img_file in enumerate(image_files):
                 img_bytes = img_file.getvalue()
-                img_type = classify_image_type(api_key, img_bytes, img_file.name)
-                # ========== 添加以下两行调试代码 ==========
-                st.write(f"图片 {img_file.name} -> 识别为: {img_type}")
-                # ========================================
-                if img_type:
-                    classified[img_type] = (img_bytes, img_file.name)
+                # OCR 提取文字
+                ocr_text = extract_text_by_ocr(img_bytes)
+                if not ocr_text.strip():
+                    st.warning(f"图片 {img_file.name} OCR 未提取到文字，跳过")
                 else:
-                    st.warning(f"无法识别图片 {img_file.name} 的证件类型，已跳过")
+                    # 基于文字分类
+                    img_type = classify_image_by_text(api_key, ocr_text, img_file.name)
+                    st.write(f"图片 {img_file.name} -> OCR 文字片段：{ocr_text[:100]}... -> 分类为: {img_type}")
+                    if img_type:
+                        classified[img_type] = (img_bytes, img_file.name)
+                    else:
+                        st.warning(f"无法根据文字识别图片 {img_file.name} 的证件类型，已跳过")
                 progress_bar.progress((i+1)/total)
             progress_bar.empty()
             
             if not classified:
-                st.error("未能识别任何有效证件图片，请确保图片清晰且包含所需的证件类型。")
+                st.error("未能识别任何有效证件图片，请确保图片清晰且包含足够的文字信息。")
             else:
-                with st.spinner("正在填充 Word 模板..."):
+                with st.spinner("正在填充 Word 模板并修改标题..."):
                     try:
                         word_bytes = word_template.getvalue()
-                        new_title = f"{sup}-{name}-{pos}-{lvl}-个人资料"  # 第一行文字改为文件名
+                        new_title = f"{sup}-{name}-{pos}-{lvl}-个人资料"
                         output_bytes = fill_word_with_images(word_bytes, classified, new_title=new_title)
                         word_filename = f"{sup}-{name}-{pos}-{lvl}-资料.docx"
-                        word_filename = "".join(c for c in word_filename if c not in r'\/:*?"<>|')
+                        word_filename = "".join(c for c in word_filename if c not in r'\/:*?"<>|")
                         st.success("✅ Word 填充成功！")
                         st.download_button(
                             label="📥 下载填充后的 Word 文件",
