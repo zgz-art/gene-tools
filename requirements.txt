@@ -6,5 +6,5 @@ python-docx>=0.8.11
 pandas>=2.0.0          # 如需保留
 httpx>=0.23.0
 pydantic>=1.9.0,<3.0.0
-paddlepaddle==2.6.0        # CPU 版本，兼容 Python 3.11/3.12
+paddlepaddle>=2.6.2,<3.0.0        # CPU 版本，兼容 Python 3.11/3.12
 paddleocr==2.7.0.3
