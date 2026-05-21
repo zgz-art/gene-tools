@@ -5,6 +5,7 @@ import io
 import tempfile
 import json
 import re
+import hashlib
 from datetime import datetime
 from copy import copy
 
@@ -21,7 +22,7 @@ import openpyxl
 from docx import Document
 from docx.shared import Inches, Emu
 
-# ==================== 页面配置 ====================
+# ==================== 页面配置（必须第一个 Streamlit 命令） ====================
 st.set_page_config(page_title="简历智能填充工具", page_icon="📄", layout="wide")
 
 st.markdown("""
@@ -80,6 +81,10 @@ if "word_template" not in st.session_state:
 if "last_word_name" not in st.session_state:
     st.session_state.last_word_name = None
 
+# 视觉模型缓存（基于图片哈希）
+if "vision_cache" not in st.session_state:
+    st.session_state.vision_cache = {}
+
 # ==================== 辅助函数 ====================
 def normalize_date(date_str: str) -> str:
     if not date_str:
@@ -100,40 +105,105 @@ def extract_text_from_pdf(pdf_file) -> str:
     reader = pypdf.PdfReader(pdf_file)
     return "\n".join(page.extract_text() for page in reader.pages)
 
+# ==================== 视觉模型统一接口（带缓存） ====================
+def get_image_hash(img_bytes: bytes) -> str:
+    """计算图片内容的 SHA256 哈希值，用作缓存 key"""
+    return hashlib.sha256(img_bytes).hexdigest()
+
+def analyze_image(api_key: str, img_bytes: bytes, img_filename: str):
+    """
+    一次视觉模型调用，同时提取图片中的文字内容和证件类型。
+    返回 (text, image_type)
+    - text: 图片中提取的文字内容（无额外解释）
+    - image_type: 证件类型字符串，若无法识别则返回 None
+    结果会缓存在 session_state.vision_cache 中，后续相同图片直接返回。
+    """
+    img_hash = get_image_hash(img_bytes)
+    cache = st.session_state.vision_cache
+    if img_hash in cache:
+        # 调试信息（可注释）
+        # st.write(f"⚡ 使用缓存: {img_filename}")
+        return cache[img_hash]
+
+    client = ZhipuAI(api_key=api_key)
+    img_base64 = base64.b64encode(img_bytes).decode('utf-8')
+    mime_type = "image/jpeg"  # 通常不影响识别
+    data_url = f"data:{mime_type};base64,{img_base64}"
+
+    types = [
+        "身份证正面照片",
+        "身份证反面照片",
+        "毕业证照片",
+        "学位证照片",
+        "学信网学历证书电子备案截图",
+        "学信网学位证书电子备案截图"
+    ]
+    options = "\n".join([f"- {t}" for t in types])
+
+    prompt = f"""请分析这张图片，完成以下两个任务：
+
+1. 提取图片中的所有文字内容，只返回文字，不要额外解释。如果图片没有文字，返回空字符串。
+2. 判断这张图片属于以下哪种证件类型：
+{options}
+
+区分要点：
+- "身份证正面照片"：包含签发机关、有效期限。
+- "身份证反面照片"：包含人像、姓名、性别、民族、出生日期、住址、公民身份号码。
+- "毕业证照片"：有“毕业证书”字样、学校名称、专业、毕业时间。
+- "学位证照片"：有“学位证书”字样、学位级别、学科名称。
+- "学信网学历证书电子备案截图"：有“教育部学历证书电子注册备案表”标题。
+- "学信网学位证书电子备案截图"：有“中国高等教育学位在线验证报告”标题。
+
+请严格按照以下 JSON 格式输出，不要输出其他内容：
+{{
+    "text": "提取的文字内容",
+    "type": "证件类型名称（必须是上面列表中的一种，如果无法确定则填“未知”）"
+}}
+"""
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": data_url}}
+            ]
+        }
+    ]
+    try:
+        response = client.chat.completions.create(
+            model="glm-4v-flash",  # 免费模型
+            messages=messages,
+            temperature=0.0,
+            response_format={"type": "json_object"}
+        )
+        result = json.loads(response.choices[0].message.content.strip())
+        text = result.get("text", "")
+        img_type = result.get("type", "未知")
+        if img_type not in types:
+            img_type = None
+        cache[img_hash] = (text, img_type)
+        return text, img_type
+    except Exception as e:
+        st.warning(f"图片 {img_filename} 分析失败: {e}")
+        return "", None
+
 def extract_text_from_images(api_key: str, model: str, image_files) -> str:
+    """从图片中提取文字（复用 analyze_image）"""
     if not image_files:
         return ""
-    client = ZhipuAI(api_key=api_key)
-    vision_model = "glm-4v-plus"
     all_texts = []
     for img_file in image_files:
         img_bytes = img_file.read()
-        img_base64 = base64.b64encode(img_bytes).decode('utf-8')
-        mime_type = img_file.type if img_file.type else "image/jpeg"
-        data_url = f"data:{mime_type};base64,{img_base64}"
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "请提取这张图片中的所有文字内容，只返回文字，不要额外解释。如果图片没有文字，返回空字符串。"},
-                    {"type": "image_url", "image_url": {"url": data_url}}
-                ]
-            }
-        ]
-        try:
-            response = client.chat.completions.create(
-                model=vision_model,
-                messages=messages,
-                temperature=0.0,
-            )
-            text = response.choices[0].message.content.strip()
-            if text:
-                all_texts.append(f"【来自图片：{img_file.name}】\n{text}")
-        except Exception as e:
-            st.warning(f"图片 {img_file.name} 识别失败: {e}")
-            continue
-        img_file.seek(0)
+        text, _ = analyze_image(api_key, img_bytes, img_file.name)
+        if text:
+            all_texts.append(f"【来自图片：{img_file.name}】\n{text}")
+        img_file.seek(0)  # 重置指针供后续使用
     return "\n\n".join(all_texts)
+
+def classify_image_type(api_key: str, img_bytes: bytes, img_filename: str) -> str:
+    """判断图片证件类型（复用 analyze_image）"""
+    _, img_type = analyze_image(api_key, img_bytes, img_filename)
+    return img_type
 
 def get_primary_cell(worksheet, row, col):
     for merged in worksheet.merged_cells.ranges:
@@ -464,83 +534,20 @@ def call_ai_analysis(api_key: str, model: str, prompt: str, resume_json: str, te
     )
     return json.loads(resp.choices[0].message.content)
 
-# ==================== 新增：Word 图片填充相关函数 ====================
-def classify_image_type(api_key: str, img_bytes: bytes, img_filename: str) -> str:
-    """调用智谱视觉模型判断图片属于哪种证件类型"""
-    client = ZhipuAI(api_key=api_key)
-    img_base64 = base64.b64encode(img_bytes).decode('utf-8')
-    mime_type = "image/jpeg"
-    data_url = f"data:{mime_type};base64,{img_base64}"
-    
-    types = [
-        "身份证正面照片",
-        "身份证反面照片",
-        "毕业证照片",
-        "学位证照片",
-        "学信网学历证书电子备案截图",
-        "学信网学位证书电子备案截图"
-    ]
-    options = "\n".join([f"- {t}" for t in types])
-    prompt = f"""请识别这张图片属于以下哪种证件类型：
-{options}
-
-区分要点：
-- "身份证正面照片"：包含签发机关、有效期限。
-- "身份证反面照片"：包含人像、姓名、性别、民族、出生日期、住址、公民身份号码。
-- "毕业证照片"：有“毕业证书”字样、学校名称、专业、毕业时间。
-- "学位证照片"：有“学位证书”字样、学位级别、学科名称。
-- "学信网学历证书电子备案截图"：有“教育部学历证书电子注册备案表”标题。
-- "学信网学位证书电子备案截图"：有“中国高等教育学位在线验证报告”标题。
-
-只输出证件类型名称，不要输出其他内容。如果无法确定，输出“未知”。
-"""
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": data_url}}
-            ]
-        }
-    ]
-    try:
-        response = client.chat.completions.create(
-            model="glm-4v-plus",
-            messages=messages,
-            temperature=0.0,
-        )
-        result = response.choices[0].message.content.strip()
-        if result in types:
-            return result
-        else:
-            return None
-    except Exception as e:
-        st.warning(f"图片 {img_filename} 识别失败: {e}")
-        return None
-
+# ==================== Word 图片填充函数 ====================
 def fill_word_with_images(word_template_bytes, image_classification, new_title=None):
     """将分类好的图片填充到 Word 模板中（适配表格结构：标题行 + 图片行）"""
-    from docx.shared import Inches
-    import io
-
     doc = Document(io.BytesIO(word_template_bytes))
-    # 如果需要修改标题，处理第一个段落
     if new_title:
         if doc.paragraphs:
             first_para = doc.paragraphs[0]
-            # 保留原段落样式（如对齐方式、缩进等）
-            # 清除原有 run，重新添加带新文本的 run，并尽量继承原字体样式
-            # 获取第一个 run 的字体属性（如果存在）
             original_font = None
             if first_para.runs:
                 original_font = first_para.runs[0].font
-            # 清空所有 run
             for run in first_para.runs:
                 run.clear()
-            # 添加新 run
             new_run = first_para.add_run(new_title)
             if original_font:
-                # 复制字体：名称、大小、粗体、斜体、下划线、颜色等
                 new_run.font.name = original_font.name
                 new_run.font.size = original_font.size
                 new_run.font.bold = original_font.bold
@@ -548,49 +555,35 @@ def fill_word_with_images(word_template_bytes, image_classification, new_title=N
                 new_run.font.underline = original_font.underline
                 if original_font.color and original_font.color.rgb:
                     new_run.font.color.rgb = original_font.color.rgb
-            # 如果原段落有居中/左对齐等，保持不变（段落属性本身不会丢失）
     for title, (img_bytes, _) in image_classification.items():
         found = False
-        # 遍历所有表格
         for table in doc.tables:
-            # 遍历行，使用 enumerate 获取行索引
             for row_idx, row in enumerate(table.rows):
-                # 遍历列，使用 enumerate 获取列索引
                 for col_idx, cell in enumerate(row.cells):
                     if title in cell.text:
-                        # 确定目标单元格：优先取下一行同一列单元格
                         if row_idx + 1 < len(table.rows):
                             target_cell = table.cell(row_idx + 1, col_idx)
                         else:
                             target_cell = cell
-                        
-                        # 清空目标单元格中的所有图片（删除 w:drawing 元素）
                         for para in target_cell.paragraphs:
                             drawings = para._element.xpath('.//w:drawing')
                             for draw in drawings:
                                 draw.getparent().remove(draw)
-                        
-                        # 插入新图片
-                        # 确保至少有一个段落可用
                         if target_cell.paragraphs:
                             para = target_cell.paragraphs[0]
                         else:
                             para = target_cell.add_paragraph()
                         run = para.add_run()
                         img_stream = io.BytesIO(img_bytes)
-                        # 设置图片宽度为 5 英寸（高度自适应），可根据需要调整
                         run.add_picture(img_stream, width=Inches(5.0))
-                        
                         found = True
                         break
                 if found:
                     break
             if found:
                 break
-        
         if not found:
             st.warning(f"未在表格中找到标题: {title}，请检查模板中的文字是否完全匹配")
-    
     output = io.BytesIO()
     doc.save(output)
     output.seek(0)
@@ -868,26 +861,37 @@ if st.session_state.ai_result is not None and excel_template is not None:
             st.download_button("📥 点击下载文件", f, file_name=filename, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         os.unlink(out_path)
 
-# ----------------- Word 模板图片填充功能（独立） -----------------
+# ----------------- Word 模板图片填充功能（复用缓存优化） -----------------
 if word_template is not None and image_files:
     st.markdown("---")
-    st.subheader("📄 Word 证件照自动填充（AI 自动识别图片类型）")
+    st.subheader("📄 Word 证件照自动填充（AI 自动识别图片类型，带缓存）")
     st.caption("系统将自动识别您上传的个人资料图片的证件类型，并填充到 Word 模板对应标题下方。")
     
     if st.button("✨ 开始填充 Word 模板", key="fill_word_btn"):
         if not api_key:
             st.error("请先在左侧边栏输入智谱 AI API Key")
         else:
-            # 对每张图片进行 AI 分类
+            # 从 session_state 中获取必要的命名信息（若无 AI 结果则使用默认值）
+            if st.session_state.ai_result is not None:
+                extra = st.session_state.ai_result.get("extra", {})
+                basic = st.session_state.ai_result.get("basic", {})
+                sup = extra.get("供应商缩写", supplier)[:4] if not supplier else supplier[:4]
+                name = basic.get("姓名", "未知")
+                pos = extra.get("岗位", position) if not position else position
+                lvl = extra.get("级别", level) if not level else level
+            else:
+                sup = supplier[:4] if supplier else "未知"
+                name = "未知"
+                pos = position if position else "java开发"
+                lvl = level if level else ""
+            
             classified = {}
             progress_bar = st.progress(0)
             total = len(image_files)
             for i, img_file in enumerate(image_files):
                 img_bytes = img_file.getvalue()
-                img_type = classify_image_type(api_key, img_bytes, img_file.name)
-                # ========== 添加以下两行调试代码 ==========
+                img_type = classify_image_type(api_key, img_bytes, img_file.name)  # 自动使用缓存
                 st.write(f"图片 {img_file.name} -> 识别为: {img_type}")
-                # ========================================
                 if img_type:
                     classified[img_type] = (img_bytes, img_file.name)
                 else:
@@ -898,10 +902,10 @@ if word_template is not None and image_files:
             if not classified:
                 st.error("未能识别任何有效证件图片，请确保图片清晰且包含所需的证件类型。")
             else:
-                with st.spinner("正在填充 Word 模板..."):
+                with st.spinner("正在填充 Word 模板并修改标题..."):
                     try:
                         word_bytes = word_template.getvalue()
-                        new_title = f"{sup}-{name}-{pos}-{lvl}-个人资料"  # 第一行文字改为文件名
+                        new_title = f"{sup}-{name}-{pos}-{lvl}-个人资料"
                         output_bytes = fill_word_with_images(word_bytes, classified, new_title=new_title)
                         word_filename = f"{sup}-{name}-{pos}-{lvl}-资料.docx"
                         word_filename = "".join(c for c in word_filename if c not in r'\/:*?"<>|')
