@@ -505,69 +505,47 @@ def classify_image_type(api_key: str, img_bytes: bytes, img_filename: str) -> st
         return None
 
 def fill_word_with_images(word_template_bytes, image_classification):
-    """将分类好的图片填充到 Word 模板中（增强匹配）"""
+    """将分类好的图片填充到 Word 模板中（适配表格结构：标题行 + 图片行）"""
     doc = Document(io.BytesIO(word_template_bytes))
     
-    # 调试：打印所有段落文本（可在 Streamlit 界面看到）
-    st.write("=== Word 模板中的所有段落（调试信息）===")
-    for i, para in enumerate(doc.paragraphs):
-        st.write(f"{i}: '{para.text}'")
-    st.write("======================================")
-    
     for title, (img_bytes, _) in image_classification.items():
-        target_para = None
-        # 标准化标题：去除空格、统一大小写（中文无大小写）
-        title_clean = title.strip()
-        for para in doc.paragraphs:
-            # 去除段落文本的首尾空格
-            para_text = para.text.strip()
-            # 直接匹配
-            if para_text == title_clean:
-                target_para = para
-                break
-            # 如果直接匹配失败，尝试移除加粗标记（某些情况下 `**` 会被保留在文本中？一般不会）
-            # 实际上 `para.text` 已经去除了格式标记，这里不需要额外处理
-        if not target_para:
-            st.warning(f"未找到标题: {title}，跳过")
-            continue
-        
-        p_idx = doc.paragraphs.index(target_para)
         found = False
-        for offset in range(1, 6):
-            if p_idx + offset >= len(doc.paragraphs):
-                break
-            para = doc.paragraphs[p_idx + offset]
-            drawings = para._element.xpath('.//w:drawing')
-            if drawings:
-                extent = drawings[0].xpath('.//wp:extent')
-                if extent:
-                    old_cx = int(extent[0].get('cx'))
-                    old_cy = int(extent[0].get('cy'))
-                    for draw in drawings:
-                        draw.getparent().remove(draw)
-                    run = para.add_run()
-                    img_stream = io.BytesIO(img_bytes)
-                    if old_cx and old_cy:
-                        run.add_picture(img_stream, width=Emu(old_cx), height=Emu(old_cy))
-                    else:
-                        run.add_picture(img_stream, width=Inches(5.0))
-                    found = True
-                else:
-                    for draw in drawings:
-                        draw.getparent().remove(draw)
-                    run = para.add_run()
-                    img_stream = io.BytesIO(img_bytes)
-                    run.add_picture(img_stream, width=Inches(5.0))
-                    found = True
+        # 遍历所有表格
+        for table in doc.tables:
+            # 遍历表格行，寻找包含标题的单元格
+            for row in table.rows:
+                for cell in row.cells:
+                    if title in cell.text:
+                        # 找到标题行，假设图片在下一行同一列
+                        row_idx = table.rows.index(row)
+                        if row_idx + 1 < len(table.rows):
+                            target_cell = table.cell(row_idx + 1, cell.column_index)
+                        else:
+                            # 如果没有下一行，则使用当前单元格（将在下方插入新段落）
+                            target_cell = cell
+                        
+                        # 清空目标单元格中的原有图片（删除所有drawing）
+                        for para in target_cell.paragraphs:
+                            drawings = para._element.xpath('.//w:drawing')
+                            for draw in drawings:
+                                draw.getparent().remove(draw)
+                        # 插入新图片（取第一个段落，或新建段落）
+                        if target_cell.paragraphs:
+                            para = target_cell.paragraphs[0]
+                        else:
+                            para = target_cell.add_paragraph()
+                        run = para.add_run()
+                        img_stream = io.BytesIO(img_bytes)
+                        run.add_picture(img_stream, width=Inches(5.0))  # 可调整宽度
+                        found = True
+                        break
+                if found:
+                    break
+            if found:
                 break
         
         if not found:
-            # 在标题后插入新段落和图片
-            new_para = doc.add_paragraph()
-            target_para._element.addnext(new_para._element)
-            run = new_para.add_run()
-            img_stream = io.BytesIO(img_bytes)
-            run.add_picture(img_stream, width=Inches(5.0))
+            st.warning(f"未在表格中找到标题: {title}，请检查模板中的文字是否完全匹配")
     
     output = io.BytesIO()
     doc.save(output)
