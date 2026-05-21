@@ -1,11 +1,10 @@
-streamlit>=1.28.0
+streamlit>=1.28.0,<1.40.0
 openpyxl>=3.1.2
 pypdf>=3.15.0
 zhipuai>=2.0.0
-pandas>=2.0.0
-sniffio
+python-docx>=0.8.11
+pandas>=2.0.0          # 如需保留
 httpx>=0.23.0
 pydantic>=1.9.0,<3.0.0
-python-docx>=0.8.11
-paddlepaddle>=2.5.0
-paddleocr>=2.7.0
+paddlepaddle==2.6.0        # CPU 版本，兼容 Python 3.11/3.12
+paddleocr==2.7.0.3
