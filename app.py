@@ -504,13 +504,37 @@ def classify_image_type(api_key: str, img_bytes: bytes, img_filename: str) -> st
         st.warning(f"图片 {img_filename} 识别失败: {e}")
         return None
 
-def fill_word_with_images(word_template_bytes, image_classification):
+def fill_word_with_images(word_template_bytes, image_classification, new_title=None):
     """将分类好的图片填充到 Word 模板中（适配表格结构：标题行 + 图片行）"""
     from docx.shared import Inches
     import io
 
     doc = Document(io.BytesIO(word_template_bytes))
-    
+    # 如果需要修改标题，处理第一个段落
+    if new_title:
+        if doc.paragraphs:
+            first_para = doc.paragraphs[0]
+            # 保留原段落样式（如对齐方式、缩进等）
+            # 清除原有 run，重新添加带新文本的 run，并尽量继承原字体样式
+            # 获取第一个 run 的字体属性（如果存在）
+            original_font = None
+            if first_para.runs:
+                original_font = first_para.runs[0].font
+            # 清空所有 run
+            for run in first_para.runs:
+                run.clear()
+            # 添加新 run
+            new_run = first_para.add_run(new_title)
+            if original_font:
+                # 复制字体：名称、大小、粗体、斜体、下划线、颜色等
+                new_run.font.name = original_font.name
+                new_run.font.size = original_font.size
+                new_run.font.bold = original_font.bold
+                new_run.font.italic = original_font.italic
+                new_run.font.underline = original_font.underline
+                if original_font.color and original_font.color.rgb:
+                    new_run.font.color.rgb = original_font.color.rgb
+            # 如果原段落有居中/左对齐等，保持不变（段落属性本身不会丢失）
     for title, (img_bytes, _) in image_classification.items():
         found = False
         # 遍历所有表格
@@ -860,12 +884,15 @@ if word_template is not None and image_files:
                 with st.spinner("正在填充 Word 模板..."):
                     try:
                         word_bytes = word_template.getvalue()
-                        output_bytes = fill_word_with_images(word_bytes, classified)
+                        new_title = f"{sup}-{name}-{pos}-{lvl}-个人资料"  # 第一行文字改为文件名
+                        output_bytes = fill_word_with_images(word_bytes, classified, new_title=new_title)
+                        word_filename = f"{sup}-{name}-{pos}-{lvl}-资料.docx"
+                        word_filename = "".join(c for c in word_filename if c not in r'\/:*?"<>|')
                         st.success("✅ Word 填充成功！")
                         st.download_button(
                             label="📥 下载填充后的 Word 文件",
                             data=output_bytes,
-                            file_name="filled_certificates.docx",
+                            file_name=word_filename,
                             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                         )
                     except Exception as e:
