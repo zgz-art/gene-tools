@@ -517,12 +517,12 @@ def fill_word_with_images(word_template_bytes, image_classification):
         for table in doc.tables:
             # 遍历行，使用 enumerate 获取行索引
             for row_idx, row in enumerate(table.rows):
-                for cell in row.cells:
+                # 遍历列，使用 enumerate 获取列索引
+                for col_idx, cell in enumerate(row.cells):
                     if title in cell.text:
-                        # 找到标题单元格。通常图片在下一行的同一列，或者就在当前单元格内。
-                        # 策略：优先尝试取下一行同一列单元格；若不存在，则使用当前单元格（并清空原内容）。
+                        # 确定目标单元格：优先取下一行同一列单元格
                         if row_idx + 1 < len(table.rows):
-                            target_cell = table.cell(row_idx + 1, cell.column_index)
+                            target_cell = table.cell(row_idx + 1, col_idx)
                         else:
                             target_cell = cell
                         
