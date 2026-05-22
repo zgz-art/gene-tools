@@ -590,7 +590,7 @@ def fill_word_with_images(word_template_bytes, image_classification, new_title=N
     return output.getvalue()
 
 # ==================== Streamlit UI ====================
-st.title("📄 智能简历填充工具")
+st.title("📄 智能简历制作辅助工具")
 st.markdown("上传 PDF 简历、个人资料图片（身份证、毕业证、学位证、学信网截图等）和 Excel/Word 模板，AI 自动提取信息并生成标准格式文件。")
 
 with st.sidebar:
