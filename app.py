@@ -304,26 +304,45 @@ def fill_education_block(ws, keyword, edu_data, is_undergrad=True):
                 break
 
 def fill_work_experience(ws, work_list):
+    # 1. 找到“工作经历”关键词行
     keyword_row = find_row_by_keyword(ws, "工作经历（由近及远，仅限IT相关经历）")
     if not keyword_row:
+        st.warning("未找到「工作经历」关键词，跳过填充")
         return
-    header_row = keyword_row + 1
-    data_start = header_row + 1
-    reserved = 3
+
+    header_row = keyword_row + 1          # 表头行
+    data_start = header_row + 1           # 数据区域起始行
+
+    # 2. 找到下一个关键词行（用于界定数据区域结束）
+    next_keyword_row = find_row_by_keyword(ws, "项目经历（与上述工作经历匹配，仅IT相关经历）")
+    if not next_keyword_row:
+        # 如果没有下一个关键词，则数据区域延伸到工作表最后一行
+        next_keyword_row = ws.max_row + 1
+
+    # 3. 计算可用数据行区域（从 data_start 到 next_keyword_row-1）
+    available_rows = next_keyword_row - data_start
+    if available_rows <= 0:
+        st.warning("工作经历区域没有预留空行，请在模板中增加空行")
+        return
+
+    # 4. 清除该区域所有行的内容（保留格式和合并单元格结构）
     max_col = ws.max_column
+    for row in range(data_start, next_keyword_row):
+        clear_row_content(ws, row, max_col)
 
-    for r in range(data_start, data_start + reserved):
-        clear_row_content(ws, r, max_col)
-
+    # 5. 按开始日期倒序排序
     sorted_work = sorted(work_list, key=lambda x: x.get("开始日期", "1900-01-01"), reverse=True)
     need = len(sorted_work)
-    if need > reserved:
-        st.warning(f"工作经历共有 {need} 条，但模板只预留了 {reserved} 行，超出部分将被忽略。请手动增加模板预留行数。")
-        need = reserved
 
+    if need > available_rows:
+        st.warning(f"工作经历共有 {need} 条，但模板只预留了 {available_rows} 行，超出部分将被忽略。请手动增加模板预留行数。")
+        need = available_rows
+
+    # 6. 填充数据
     for idx in range(need):
         work = sorted_work[idx]
         target_row = data_start + idx
+        # 遍历每一列，根据表头文字匹配写入
         for col in range(1, max_col + 1):
             header = ws.cell(header_row, col).value
             if not header:
@@ -341,23 +360,39 @@ def fill_work_experience(ws, work_list):
                 safe_write(ws, target_row, col, work.get("是否邮储银行自主研发工作经验", ""))
 
 def fill_project_experience(ws, project_list):
+    # 1. 找到“项目经历”关键词行
     keyword_row = find_row_by_keyword(ws, "项目经历（与上述工作经历匹配，仅IT相关经历）")
     if not keyword_row:
+        st.warning("未找到「项目经历」关键词，跳过填充")
         return
+
     header_row = keyword_row + 1
     data_start = header_row + 1
-    reserved = 6
+
+    # 2. 找到下一个关键词行（如果没有则到工作表末尾）
+    #   注意：模板可能在项目经历后面还有“其他”或“证书”等，可以继续扩展关键词列表
+    next_keyword_row = find_row_by_keyword(ws, "技术特长")
+    if not next_keyword_row:
+        next_keyword_row = ws.max_row + 1
+
+    available_rows = next_keyword_row - data_start
+    if available_rows <= 0:
+        st.warning("项目经历区域没有预留空行，请在模板中增加空行")
+        return
+
+    # 3. 清除区域内容
     max_col = ws.max_column
+    for row in range(data_start, next_keyword_row):
+        clear_row_content(ws, row, max_col)
 
-    for r in range(data_start, data_start + reserved):
-        clear_row_content(ws, r, max_col)
-
+    # 4. 排序
     sorted_proj = sorted(project_list, key=lambda x: x.get("开始日期", "1900-01-01"), reverse=True)
     need = len(sorted_proj)
-    if need > reserved:
-        st.warning(f"项目经历共有 {need} 条，但模板只预留了 {reserved} 行，超出部分将被忽略。请手动增加模板预留行数。")
-        need = reserved
+    if need > available_rows:
+        st.warning(f"项目经历共有 {need} 条，但模板只预留了 {available_rows} 行，超出部分将被忽略。请手动增加模板预留行数。")
+        need = available_rows
 
+    # 5. 填充
     for idx in range(need):
         proj = sorted_proj[idx]
         target_row = data_start + idx
