@@ -171,7 +171,7 @@ def analyze_image(api_key: str, img_bytes: bytes, img_filename: str):
     ]
     try:
         response = client.chat.completions.create(
-            model="glm-4.6v-flash",  # 免费模型
+            model="glm-4v-flash",  # 免费模型
             messages=messages,
             temperature=0.0,
             response_format={"type": "json_object"}
