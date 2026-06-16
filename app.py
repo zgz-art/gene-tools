@@ -165,7 +165,7 @@ def analyze_image(api_key: str, img_bytes: bytes, img_filename: str):
         # 使用你原来 prompt 中的关键词规则（可根据实际调整）
         if "居民身份证" in text and "签发机关" in text and "有效期限" in text:
             img_type = "身份证正面照片" 
-        if "姓名" in text and "性别" in text and "公民身份号码" in text:
+        elif "姓名" in text and "性别" in text and "公民身份号码" in text:
             img_type = "身份证反面照片"
         elif "毕业证书" in text:
             img_type = "毕业证照片"
