@@ -167,14 +167,15 @@ def analyze_image(api_key: str, img_bytes: bytes, img_filename: str):
             img_type = "身份证正面照片" 
         elif "姓名" in text and "性别" in text and "公民身份号码" in text:
             img_type = "身份证反面照片"
-        elif "毕业证书" in text:
-            img_type = "毕业证照片"
-        elif "学位证书" in text:
-            img_type = "学位证照片"
         elif "教育部学历证书电子注册备案表" in text:
             img_type = "学信网学历证书电子备案截图"
         elif "中国高等教育学位在线验证报告" in text:
             img_type = "学信网学位证书电子备案截图"
+        elif "毕业证书" in text:
+            img_type = "毕业证照片"
+        elif "学位证书" in text:
+            img_type = "学位证照片"
+        
         # 若都匹配不上，可进一步细化规则
         else:
             img_type = None  # 未知
