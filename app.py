@@ -134,7 +134,7 @@ def analyze_image(api_key: str, img_bytes: bytes, img_filename: str):
     }
     # 根据官方文档，tool_type 是必填参数，这里使用 'common' 进行通用文字识别
     data = {
-        'tool_type': 'common'  # 通用文字识别
+        'tool_type': 'hand_write'  # 通用文字识别
         # 'language_type': 'CHN_ENG' # 可指定语言，默认为自动检测
     }
 
