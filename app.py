@@ -6,6 +6,7 @@ import tempfile
 import json
 import re
 import hashlib
+import requests
 from datetime import datetime
 from copy import copy
 
@@ -112,81 +113,62 @@ def get_image_hash(img_bytes: bytes) -> str:
 
 def analyze_image(api_key: str, img_bytes: bytes, img_filename: str):
     """
-    一次视觉模型调用，同时提取图片中的文字内容和证件类型。
+    使用 GLM-OCR 提取图片文字，并通过关键词匹配判断证件类型。
     返回 (text, image_type)
-    - text: 图片中提取的文字内容（无额外解释）
-    - image_type: 证件类型字符串，若无法识别则返回 None
-    结果会缓存在 session_state.vision_cache 中，后续相同图片直接返回。
     """
     img_hash = get_image_hash(img_bytes)
     cache = st.session_state.vision_cache
     if img_hash in cache:
-        # 调试信息（可注释）
-        # st.write(f"⚡ 使用缓存: {img_filename}")
         return cache[img_hash]
 
-    client = ZhipuAI(api_key=api_key)
+    # 1. 调用 GLM-OCR API 提取文字
     img_base64 = base64.b64encode(img_bytes).decode('utf-8')
-    mime_type = "image/jpeg"  # 通常不影响识别
-    data_url = f"data:{mime_type};base64,{img_base64}"
-
-    types = [
-        "身份证正面照片",
-        "身份证反面照片",
-        "毕业证照片",
-        "学位证照片",
-        "学信网学历证书电子备案截图",
-        "学信网学位证书电子备案截图"
-    ]
-    options = "\n".join([f"- {t}" for t in types])
-
-    prompt = f"""请分析这张图片，完成以下两个任务：
-
-1. 提取图片中的所有文字内容，只返回文字，不要额外解释。如果图片没有文字，返回空字符串。
-2. 根据文字内容区分判断这张图片属于以下哪种证件类型：
-{options}
-
-区分判断要点：
-- "身份证正面照片"：直接分析文字内容，有居民身份证、签发机关、有效期限等字样。
-- "身份证反面照片"：直接分析文字内容，有姓名、性别、民族、出生日期、住址、公民身份号码等字样。
-- "毕业证照片"：有“毕业证书”字样、学校名称、专业、毕业时间。
-- "学位证照片"：有“学位证书”字样、学位级别、学科名称。
-- "学信网学历证书电子备案截图"：有“教育部学历证书电子注册备案表”标题。
-- "学信网学位证书电子备案截图"：有“中国高等教育学位在线验证报告”标题。
-
-请严格按照以下 JSON 格式输出，不要输出其他内容：
-{{
-    "text": "提取的文字内容",
-    "type": "证件类型名称（必须是上面列表中的一种，如果无法确定则填“未知”）"
-}}
-"""
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": data_url}}
-            ]
+    # 注意：实际 API 地址请以官方文档为准，此处示例使用智谱开放平台地址
+    url = "https://open.bigmodel.cn/api/paas/v1/ocr"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "glm-ocr",   # 或者 "zhipu/glm-ocr"
+        "document": {
+            "type": "image_url",
+            "image_url": f"data:image/jpeg;base64,{img_base64}"
         }
-    ]
+    }
     try:
-        response = client.chat.completions.create(
-            model="glm-4v-flash",  # 免费模型
-            messages=messages,
-            temperature=0.0,
-            response_format={"type": "json_object"}
-        )
-        result = json.loads(response.choices[0].message.content.strip())
-        text = result.get("text", "")
-        img_type = result.get("type", "未知")
-        if img_type not in types:
-            img_type = None
-        cache[img_hash] = (text, img_type)
-        return text, img_type
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+        # 提取识别文本（假设返回结构有 pages[0].markdown）
+        text = result.get('pages', [{}])[0].get('markdown', '').strip()
     except Exception as e:
-        st.warning(f"图片 {img_filename} 分析失败: {e}")
+        st.warning(f"图片 {img_filename} OCR 失败: {e}")
         return "", None
 
+    # 2. 根据提取的文字内容判断证件类型（规则匹配）
+    img_type = None
+    if text:
+        # 使用你原来 prompt 中的关键词规则（可根据实际调整）
+        if "居民身份证" in text and "签发机关" in text and "有效期限" in text:
+            img_type = "身份证正面照片" 
+        if "姓名" in text and "性别" in text and "公民身份号码" in text:
+            img_type = "身份证反面照片"
+        elif "毕业证书" in text:
+            img_type = "毕业证照片"
+        elif "学位证书" in text:
+            img_type = "学位证照片"
+        elif "教育部学历证书电子注册备案表" in text:
+            img_type = "学信网学历证书电子备案截图"
+        elif "中国高等教育学位在线验证报告" in text:
+            img_type = "学信网学位证书电子备案截图"
+        # 若都匹配不上，可进一步细化规则
+        else:
+            img_type = None  # 未知
+
+    # 缓存结果
+    cache[img_hash] = (text, img_type)
+    return text, img_type
 def extract_text_from_images(api_key: str, model: str, image_files) -> str:
     """从图片中提取文字（复用 analyze_image）"""
     if not image_files:
